@@ -1,0 +1,20 @@
+{
+	"name": "com.framedash.sdk",
+	"version": "0.1.0",
+	"displayName": "Framedash Telemetry SDK",
+	"description": "Game telemetry SDK for Framedash analytics platform",
+	"unity": "2022.3",
+	"documentationUrl": "https://docs.framedash.dev/en/sdk/unity",
+	"license": "MIT",
+	"author": {
+		"name": "Crane Valley",
+		"url": "https://github.com/crane-valley"
+	},
+	"keywords": [
+		"telemetry",
+		"analytics",
+		"game",
+		"performance"
+	],
+	"samples": []
+}
