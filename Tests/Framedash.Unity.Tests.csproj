@@ -18,8 +18,10 @@
   <ItemGroup>
     <Compile Include="Stubs\UnityEngineStub.cs" />
     <Compile Include="BatchPolicyTests.cs" />
+    <Compile Include="CameraMathTests.cs" />
     <Compile Include="EndpointSecurityTests.cs" />
     <Compile Include="EventBufferTests.cs" />
+    <Compile Include="FieldClampTests.cs" />
     <Compile Include="ProtobufWriterTests.cs" />
     <Compile Include="TelemetrySerializerTests.cs" />
     <Compile Include="SessionIdGeneratorTests.cs" />
@@ -27,13 +29,16 @@
     <Compile Include="SamplingPolicyTests.cs" />
     <Compile Include="RetryPolicyTests.cs" />
     <Compile Include="FlushPolicyTests.cs" />
+    <Compile Include="PersistenceProviderTests.cs" />
   </ItemGroup>
 
   <!-- Production source files from Runtime (engine-independent only) -->
   <ItemGroup>
     <Compile Include="..\Runtime\BatchPolicy.cs" Link="Runtime\BatchPolicy.cs" />
+    <Compile Include="..\Runtime\CameraMath.cs" Link="Runtime\CameraMath.cs" />
     <Compile Include="..\Runtime\EndpointSecurity.cs" Link="Runtime\EndpointSecurity.cs" />
     <Compile Include="..\Runtime\EventBuffer.cs" Link="Runtime\EventBuffer.cs" />
+    <Compile Include="..\Runtime\FieldClamp.cs" Link="Runtime\FieldClamp.cs" />
     <Compile Include="..\Runtime\ProtobufWriter.cs" Link="Runtime\ProtobufWriter.cs" />
     <Compile Include="..\Runtime\TelemetrySerializer.cs" Link="Runtime\TelemetrySerializer.cs" />
     <Compile Include="..\Runtime\TelemetryEvent.cs" Link="Runtime\TelemetryEvent.cs" />
@@ -42,6 +47,7 @@
     <Compile Include="..\Runtime\SamplingPolicy.cs" Link="Runtime\SamplingPolicy.cs" />
     <Compile Include="..\Runtime\RetryPolicy.cs" Link="Runtime\RetryPolicy.cs" />
     <Compile Include="..\Runtime\FlushPolicy.cs" Link="Runtime\FlushPolicy.cs" />
+    <Compile Include="..\Runtime\PersistenceProvider.cs" Link="Runtime\PersistenceProvider.cs" />
   </ItemGroup>
 
 </Project>

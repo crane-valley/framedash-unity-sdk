@@ -22,6 +22,16 @@ namespace Framedash
             get { lock (_lock) return _count; }
         }
 
+        /// <summary>
+        /// Cumulative number of events dropped because the ring was full (oldest evicted).
+        /// Monotonic for the buffer's lifetime; the offline queue uses it to detect when a
+        /// burst has evicted restored (persisted) events from the head.
+        /// </summary>
+        public int DroppedCount
+        {
+            get { lock (_lock) return _droppedCount; }
+        }
+
         public int Capacity => _buffer.Length;
 
         public EventBuffer(int capacity)

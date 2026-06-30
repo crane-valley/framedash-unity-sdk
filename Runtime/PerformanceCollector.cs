@@ -58,15 +58,25 @@ namespace Framedash
 		public PerfSnapshot Collect()
 		{
 			float deltaTime = Time.unscaledDeltaTime;
+			float rawFrameTimeMs = deltaTime * 1000f;
+			// Clamp the real-time frame delta to the ingest frame-time ceiling (10000ms):
+			// a long pause/resume gap would otherwise emit a frame_time the validator
+			// rejects (dropping the whole batch).
+			float frameTimeMs = FieldClamp.ClampTimingMs(rawFrameTimeMs);
 
 			return new PerfSnapshot
 			{
-				Fps = deltaTime > 0f ? 1f / deltaTime : 0f,
-				FrameTimeMs = deltaTime * 1000f,
-				MemoryUsedBytes = Profiler.GetTotalAllocatedMemoryLong(),
-				GpuTimeMs = _cachedGpuTimeMs,
-				GameThreadMs = _cachedGameThreadMs,
-				RenderThreadMs = _cachedRenderThreadMs,
+				// Derive FPS from the RAW frame delta (only the high end is capped, to
+				// 1000): deriving it from the CLAMPED frame time would report a long
+				// (>10s) frame as 0.1 fps instead of its true lower rate. fps down to 0
+				// is valid to ingest.
+				Fps = FieldClamp.FpsFromFrameTimeMs(rawFrameTimeMs),
+				FrameTimeMs = frameTimeMs,
+				MemoryUsedBytes = FieldClamp.ClampMemory(Profiler.GetTotalAllocatedMemoryLong()),
+				// FrameTimingManager values can be NaN/huge; clamp each to [0, 10000].
+				GpuTimeMs = FieldClamp.ClampTimingMs(_cachedGpuTimeMs),
+				GameThreadMs = FieldClamp.ClampTimingMs(_cachedGameThreadMs),
+				RenderThreadMs = FieldClamp.ClampTimingMs(_cachedRenderThreadMs),
 			};
 		}
 	}

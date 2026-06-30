@@ -1,6 +1,6 @@
 {
 	"name": "com.framedash.sdk",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"displayName": "Framedash Telemetry SDK",
 	"description": "Game telemetry SDK for Framedash analytics platform",
 	"unity": "2022.3",
@@ -16,5 +16,11 @@
 		"game",
 		"performance"
 	],
-	"samples": []
+	"samples": [
+		{
+			"displayName": "In-Editor Quickstart",
+			"description": "Activate your project from Play mode: send one map-qualified event and see it on the heatmap.",
+			"path": "Samples~/InEditorQuickstart"
+		}
+	]
 }

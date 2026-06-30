@@ -180,6 +180,17 @@ namespace Framedash
             WriteFixed32(FloatToUInt32(value));
         }
 
+        /// <summary>
+        /// Write a float field unconditionally, even when the value is 0.
+        /// For proto3 `optional` (presence-tracked) fields, where 0 is a real value.
+        /// </summary>
+        public void WriteFloatPresent(int fieldNumber, float value)
+        {
+            if (_disposed) return;
+            WriteTag(fieldNumber, Wire32Bit);
+            WriteFixed32(FloatToUInt32(value));
+        }
+
         /// <summary>Write a double field (64-bit fixed). Skipped if zero (proto3 default).</summary>
         public void WriteDouble(int fieldNumber, double value)
         {

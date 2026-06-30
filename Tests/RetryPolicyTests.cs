@@ -169,17 +169,15 @@ namespace Framedash.Tests
         }
 
         [Test]
-        public void Classify_3xx_ReturnsRetry_WhenAttemptsLeft()
+        public void Classify_3xx_ReturnsFail()
         {
-            // 3xx with redirectLimit=0 retries to match original fall-through
-            Assert.That(_policy.Classify(301, 0, 10), Is.EqualTo(RetryAction.Retry));
-            Assert.That(_policy.Classify(302, 0, 10), Is.EqualTo(RetryAction.Retry));
-        }
-
-        [Test]
-        public void Classify_3xx_ReturnsFail_WhenAttemptsExhausted()
-        {
-            Assert.That(_policy.Classify(301, 5, 10), Is.EqualTo(RetryAction.Fail));
+            // UnityWebRequest.redirectLimit=0 means redirects are never followed.
+            // A surfaced 3xx is a misconfigured or compromised endpoint, not a
+            // transient error -- fail immediately so it surfaces rather than
+            // consuming the full retry budget. Mirrors UE5 FRetryPolicy.
+            Assert.That(_policy.Classify(301, 0, 10), Is.EqualTo(RetryAction.Fail));
+            Assert.That(_policy.Classify(302, 0, 10), Is.EqualTo(RetryAction.Fail));
+            Assert.That(_policy.Classify(304, 0, 10), Is.EqualTo(RetryAction.Fail));
         }
 
         // -- Constructor defaults --

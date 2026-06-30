@@ -39,8 +39,7 @@ namespace Framedash
 
         /// <summary>
         /// Whether a specific status code is known-retryable (5xx, 429, network error).
-        /// Internal: production code should use <see cref="Classify"/> which also
-        /// retries unknown codes (3xx, 1xx) to match the original fall-through.
+        /// Internal: production code should use <see cref="Classify"/>.
         /// </summary>
         internal bool ShouldRetry(long httpStatusCode, int attempt)
         {
@@ -86,9 +85,16 @@ namespace Framedash
             if (httpStatusCode == 413)
                 return RetryAction.Fail;
 
-            // Everything not explicitly non-retryable (5xx, 429, network
-            // errors, 3xx, 1xx, etc.) is retried -- matches the original
-            // TransportLayer fall-through behavior.
+            // 3xx: UnityWebRequest.redirectLimit=0 means redirects are never
+            // followed, so a surfaced 3xx indicates a misconfigured or
+            // compromised endpoint. Retrying cannot succeed -- fail immediately
+            // so the error surfaces rather than consuming the full retry budget
+            // on every batch. Mirrors UE5 FRetryPolicy behavior exactly.
+            if (httpStatusCode >= 300 && httpStatusCode < 400)
+                return RetryAction.Fail;
+
+            // Everything else (5xx, 429, network errors with status 0, 1xx)
+            // retries until the attempt budget is exhausted.
             if (attempt >= MaxRetries)
                 return RetryAction.Fail;
 

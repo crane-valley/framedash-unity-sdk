@@ -295,5 +295,48 @@ namespace Framedash.Tests
 
             Assert.That(w.ToArray(), Is.EqualTo(before));
         }
+
+        [Test]
+        public void WriteFloatPresent_Zero_EmitsExactly6Bytes()
+        {
+            // WriteFloatPresent(18, 0f) must emit tag + 4 zero bytes.
+            // tag for field 18, wire type 5 (32-bit): raw tag value = (18<<3)|5 = 149.
+            // 149 > 127 so it needs a 2-byte varint: [0x95, 0x01].
+            // Total: 2 (tag varint) + 4 (fixed32) = 6 bytes.
+            // 0f IEEE 754 = 0x00000000 little-endian -> 4 zero bytes.
+            var w = new ProtobufWriter();
+            w.WriteFloatPresent(18, 0f);
+            var bytes = w.ToArray();
+
+            Assert.That(bytes.Length, Is.EqualTo(6), "tag varint (2) + fixed32 (4) = 6 bytes");
+            Assert.That(bytes[0], Is.EqualTo(0x95), "first varint byte of tag for field 18 wire type 5");
+            Assert.That(bytes[1], Is.EqualTo(0x01), "second varint byte of tag for field 18 wire type 5");
+            Assert.That(bytes[2], Is.EqualTo(0x00));
+            Assert.That(bytes[3], Is.EqualTo(0x00));
+            Assert.That(bytes[4], Is.EqualTo(0x00));
+            Assert.That(bytes[5], Is.EqualTo(0x00));
+        }
+
+        [Test]
+        public void WriteFloatPresent_NonZero_RoundTrips()
+        {
+            // Write 45.0f on field 19, read back the IEEE 754 bytes.
+            // tag for field 19, wire type 5: raw value = (19<<3)|5 = 157.
+            // 157 > 127 so it needs a 2-byte varint: [0x9D, 0x01].
+            // Total: 2 (tag varint) + 4 (fixed32) = 6 bytes.
+            var w = new ProtobufWriter();
+            w.WriteFloatPresent(19, 45.0f);
+            var bytes = w.ToArray();
+
+            Assert.That(bytes.Length, Is.EqualTo(6), "tag varint (2) + fixed32 (4) = 6 bytes");
+            Assert.That(bytes[0], Is.EqualTo(0x9D), "first varint byte of tag for field 19 wire type 5");
+            Assert.That(bytes[1], Is.EqualTo(0x01), "second varint byte of tag for field 19 wire type 5");
+
+            // protobuf fixed32 is always little-endian; derive the expected bytes
+            // from the IEEE 754 bit pattern via shifts so the test is endian-independent.
+            int bits = BitConverter.SingleToInt32Bits(45.0f);
+            for (int i = 0; i < 4; i++)
+                Assert.That(bytes[2 + i], Is.EqualTo((byte)((bits >> (8 * i)) & 0xFF)), $"little-endian byte {i} of 45.0f");
+        }
     }
 }

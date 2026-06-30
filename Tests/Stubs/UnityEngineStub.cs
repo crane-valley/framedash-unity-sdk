@@ -20,4 +20,11 @@ namespace UnityEngine
             return value;
         }
     }
+
+    // FilePersistence.DefaultQueueFilePath references this; tests use the
+    // path-injecting constructor instead, so the value only needs to compile.
+    public static class Application
+    {
+        public static string persistentDataPath => System.IO.Path.GetTempPath();
+    }
 }

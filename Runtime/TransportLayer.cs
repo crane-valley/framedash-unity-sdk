@@ -8,6 +8,23 @@ using UnityEngine.Networking;
 namespace Framedash
 {
     /// <summary>
+    /// Out-param holder for <see cref="TransportLayer.SendBatch"/>. Unity coroutines
+    /// cannot return a value, so the caller passes one of these and reads it once the
+    /// coroutine completes.
+    /// </summary>
+    public sealed class DeliveryResult
+    {
+        /// <summary>
+        /// Number of events, counting from the front of the batch, that were delivered
+        /// as one contiguous run. Delivery is "leading" because the offline-queue ack
+        /// only cares about the persisted block at the head of the batch: events after
+        /// the first non-delivered one are not counted even if a later split delivered
+        /// them. 0 means nothing was delivered; events.Length means the whole batch was.
+        /// </summary>
+        public int DeliveredLeadingCount;
+    }
+
+    /// <summary>
     /// Handles HTTP transport of telemetry batches to the Framedash ingest endpoint.
     /// Uses Protobuf + gzip encoding. Delegates retry decisions to <see cref="RetryPolicy"/>.
     /// </summary>
@@ -45,14 +62,30 @@ namespace Framedash
         }
 
         /// <summary>
-        /// Serialize and send a batch of events using Protobuf + gzip.
+        /// Serialize and send a batch of events using Protobuf + gzip. Reports how many
+        /// leading events were delivered via <paramref name="result"/> so the caller can
+        /// acknowledge persisted events and re-persist the undelivered tail.
         /// </summary>
-        public IEnumerator SendBatch(TelemetryEvent[] events)
+        public IEnumerator SendBatch(TelemetryEvent[] events, DeliveryResult result)
         {
-            // Fail closed: an endpoint that did not pass the security check disables
-            // the transport entirely (matches the UE5 SDK dropping batches). The error
-            // was already logged once at construction; stay quiet here to avoid spam.
-            if (_disabled || events == null || events.Length == 0) yield break;
+            // Never throw out of the SDK: tolerate a null out-param even though the only
+            // in-SDK caller always passes one (writes below would otherwise NRE).
+            result ??= new DeliveryResult();
+            // Reset before any early return so the result always reflects THIS send, even
+            // if a caller reuses the instance across batches.
+            result.DeliveredLeadingCount = 0;
+            if (events == null || events.Length == 0) yield break;
+
+            // Fail closed: an endpoint that did not pass the security check disables the
+            // transport entirely (matches the UE5 SDK dropping batches). Report the batch
+            // as handled so the offline queue drains rather than accumulating forever
+            // against a misconfigured endpoint; the error was already logged once at
+            // construction, so stay quiet here to avoid spam.
+            if (_disabled)
+            {
+                result.DeliveredLeadingCount = events.Length;
+                yield break;
+            }
 
             // Chunk to the SERVER per-request caps (event count AND decoded-entry
             // count = events + all attribute/metric map entries), NOT the per-flush
@@ -63,7 +96,7 @@ namespace Framedash
             // so a stall/burst drain is not fragmented into many tiny requests.
             if (BatchPolicy.ExceedsWireCaps(events))
             {
-                yield return SplitAndResend(events);
+                yield return SplitAndResend(events, result);
                 yield break;
             }
 
@@ -74,14 +107,18 @@ namespace Framedash
             }
             catch (Exception e)
             {
+                // A serialization failure is deterministic, so persisting the batch would
+                // only reload a poison payload that fails again every run. Report it as
+                // handled to drop it instead of wedging the offline queue.
                 Debug.LogError($"[Framedash] Serialization failed: {e.Message}");
+                result.DeliveredLeadingCount = events.Length;
                 yield break;
             }
 
             // If payload exceeds max, split batch in half and retry
             if (payload.Length > _maxPayloadBytes && events.Length > 1)
             {
-                yield return SplitAndResend(events);
+                yield return SplitAndResend(events, result);
                 yield break;
             }
 
@@ -106,29 +143,43 @@ namespace Framedash
                     switch (action)
                     {
                         case RetryAction.Success:
+                            result.DeliveredLeadingCount = events.Length;
                             yield break;
 
                         case RetryAction.SplitBatch:
-                            yield return SplitAndResend(events);
+                            yield return SplitAndResend(events, result);
                             yield break;
 
                         case RetryAction.Fail:
-                            Debug.LogWarning($"[Framedash] Send failed (HTTP {request.responseCode}): {request.downloadHandler.text}");
+                            // A non-retryable failure inside the retry loop is a permanent
+                            // client error (4xx other than 429, a surfaced 3xx, or a single
+                            // event too large to split) -- it can never succeed. Report it
+                            // as handled so the batch is dropped, not persisted: persisting
+                            // a poison payload would refill the capped queue every launch
+                            // and block newer telemetry behind events that always fail.
+                            // (Retry exhaustion on a transient code falls through below with
+                            // DeliveredLeadingCount = 0, so those events ARE persisted.)
+                            Debug.LogWarning($"[Framedash] Send failed permanently (HTTP {request.responseCode}); dropping {events.Length} event(s): {request.downloadHandler.text}");
+                            result.DeliveredLeadingCount = events.Length;
                             yield break;
 
                         case RetryAction.Retry:
                             float delay = _retryPolicy.GetRetryDelaySeconds(attempt);
                             Debug.LogWarning($"[Framedash] Retry {attempt + 1}/{_retryPolicy.MaxRetries} in {delay:F1}s (HTTP {request.responseCode})");
-                            yield return new WaitForSeconds(delay);
+                            // Real-time wait so an app pause / Time.timeScale == 0 does not
+                            // stall retry backoff (WaitForSeconds is scaled by Time.timeScale).
+                            yield return new WaitForSecondsRealtime(delay);
                             break;
                     }
                 }
             }
 
-            Debug.LogError($"[Framedash] Failed to send batch after {_retryPolicy.MaxRetries} retries. Dropping {events.Length} events.");
+            // Retries exhausted: nothing delivered (DeliveredLeadingCount stays 0) so the
+            // caller persists the batch instead of dropping it.
+            Debug.LogWarning($"[Framedash] Failed to send batch after {_retryPolicy.MaxRetries} retries. Persisting {events.Length} event(s) for a later run.");
         }
 
-        private IEnumerator SplitAndResend(TelemetryEvent[] events)
+        private IEnumerator SplitAndResend(TelemetryEvent[] events, DeliveryResult result)
         {
             int mid = events.Length / 2;
             var firstHalf = new TelemetryEvent[mid];
@@ -136,8 +187,19 @@ namespace Framedash
             Array.Copy(events, 0, firstHalf, 0, mid);
             Array.Copy(events, mid, secondHalf, 0, events.Length - mid);
 
-            yield return SendBatch(firstHalf);
-            yield return SendBatch(secondHalf);
+            var firstResult = new DeliveryResult();
+            yield return SendBatch(firstHalf, firstResult);
+            var secondResult = new DeliveryResult();
+            yield return SendBatch(secondHalf, secondResult);
+
+            // "Leading delivered" is contiguous from the front, so the second half only
+            // extends it when the first half was delivered in full. If the first half is
+            // partial, the leading count stops there and the caller persists everything
+            // from that boundary on -- any events the second half did deliver may be
+            // re-sent next run, a rare duplicate we accept so an event is never lost.
+            result.DeliveredLeadingCount = firstResult.DeliveredLeadingCount == firstHalf.Length
+                ? firstHalf.Length + secondResult.DeliveredLeadingCount
+                : firstResult.DeliveredLeadingCount;
         }
 
         private static byte[] Compress(byte[] data)

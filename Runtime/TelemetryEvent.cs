@@ -52,5 +52,7 @@ namespace Framedash
         public List<FloatPair> Metrics;
         public float GameThreadMs;
         public float RenderThreadMs;
+        public float? CameraYaw;
+        public float? CameraPitch;
     }
 }

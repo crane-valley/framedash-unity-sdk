@@ -357,5 +357,122 @@ namespace Framedash.Tests
             // Position sub-message should be present (Y is non-zero)
             Assert.That(fieldNumbers, Does.Contain(5), "position sub-message present");
         }
+
+        [Test]
+        public void Serialize_CameraYawPitchBothZero_EmitsFields18And19()
+        {
+            // When CameraYaw=0f and CameraPitch=0f are explicitly set (HasValue=true),
+            // fields 18 and 19 MUST appear in the serialized bytes even though the
+            // values are 0 (yaw=0 = North is a valid value).
+            // tag for field 18, wire type 5 = (18<<3)|5 = 0x95
+            // tag for field 19, wire type 5 = (19<<3)|5 = 0x9D
+            var events = new[]
+            {
+                new TelemetryEvent
+                {
+                    EventName = "cam_test",
+                    TimestampUs = 1L,
+                    SessionId = "s",
+                    CameraYaw = 0f,
+                    CameraPitch = 0f,
+                }
+            };
+
+            var bytes = TelemetrySerializer.Serialize(events);
+            var batchFields = ParseFields(bytes);
+            var (eventPayload, _) = ReadLengthDelimited(bytes, batchFields[0].valueOffset);
+            var eventFields = ParseFields(eventPayload);
+
+            // Fields 18 and 19 must be present as 32-bit (wire type 5) fields even
+            // though both values are 0 (yaw 0 = North is a real value).
+            Assert.That(
+                eventFields.Exists(f => f.field == 18 && f.wireType == 5),
+                Is.True,
+                "field 18 (camera_yaw=0) must be present as a 32-bit field");
+            Assert.That(
+                eventFields.Exists(f => f.field == 19 && f.wireType == 5),
+                Is.True,
+                "field 19 (camera_pitch=0) must be present as a 32-bit field");
+        }
+
+        [Test]
+        public void Serialize_CameraYawSetPitchNull_OmitsBothFields()
+        {
+            // both-or-neither: a present-mismatch must never reach the wire (ingest
+            // rejects it), so the serializer drops both when only one is set.
+            var events = new[]
+            {
+                new TelemetryEvent
+                {
+                    EventName = "cam_partial",
+                    TimestampUs = 1L,
+                    SessionId = "s",
+                    CameraYaw = 90f,
+                    // CameraPitch left null
+                }
+            };
+
+            var bytes = TelemetrySerializer.Serialize(events);
+            var batchFields = ParseFields(bytes);
+            var (eventPayload, _) = ReadLengthDelimited(bytes, batchFields[0].valueOffset);
+            var eventFields = ParseFields(eventPayload);
+
+            Assert.That(eventFields.Exists(f => f.field == 18), Is.False, "field 18 dropped when pitch missing");
+            Assert.That(eventFields.Exists(f => f.field == 19), Is.False, "field 19 absent when pitch missing");
+        }
+
+        [Test]
+        public void Serialize_CameraNonFinite_OmitsBothFields()
+        {
+            // finite-only: NaN/Inf must never reach the wire (ingest rejects it).
+            var events = new[]
+            {
+                new TelemetryEvent
+                {
+                    EventName = "cam_nan",
+                    TimestampUs = 1L,
+                    SessionId = "s",
+                    CameraYaw = float.NaN,
+                    CameraPitch = 10f,
+                }
+            };
+
+            var bytes = TelemetrySerializer.Serialize(events);
+            var batchFields = ParseFields(bytes);
+            var (eventPayload, _) = ReadLengthDelimited(bytes, batchFields[0].valueOffset);
+            var eventFields = ParseFields(eventPayload);
+
+            Assert.That(eventFields.Exists(f => f.field == 18), Is.False, "field 18 dropped when yaw is NaN");
+            Assert.That(eventFields.Exists(f => f.field == 19), Is.False, "field 19 dropped when yaw is NaN");
+        }
+
+        [Test]
+        public void Serialize_CameraYawPitchNull_OmitsFields18And19()
+        {
+            // When CameraYaw and CameraPitch are null (HasValue=false), neither
+            // field 18 nor 19 should appear (both-or-neither invariant, unset case).
+            var events = new[]
+            {
+                new TelemetryEvent
+                {
+                    EventName = "cam_null_test",
+                    TimestampUs = 1L,
+                    SessionId = "s",
+                    // CameraYaw and CameraPitch default to null
+                }
+            };
+
+            var bytes = TelemetrySerializer.Serialize(events);
+            var batchFields = ParseFields(bytes);
+            var (eventPayload, _) = ReadLengthDelimited(bytes, batchFields[0].valueOffset);
+            var eventFields = ParseFields(eventPayload);
+
+            var fieldNumbers = new HashSet<int>();
+            foreach (var f in eventFields)
+                fieldNumbers.Add(f.field);
+
+            Assert.That(fieldNumbers, Does.Not.Contain(18), "field 18 (camera_yaw) must be absent when null");
+            Assert.That(fieldNumbers, Does.Not.Contain(19), "field 19 (camera_pitch) must be absent when null");
+        }
     }
 }

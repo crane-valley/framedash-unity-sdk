@@ -113,7 +113,21 @@ namespace Framedash
             // field 17: string engine_version
             w.WriteString(17, e.EngineVersion);
 
-            // fields 18-19 (camera_yaw, camera_pitch) not yet collected by Unity SDK
+            // fields 18-19: optional camera_yaw / camera_pitch. Single enforcement
+            // point for the ingest invariants -- written together or not at all
+            // (a present-mismatch is rejected) and only when both are finite
+            // (NaN/Inf rejected). WriteFloatPresent emits even when the value is 0
+            // (yaw 0 = North is a real value, unlike the zero-skipping WriteFloat).
+            if (e.CameraYaw.HasValue
+                && e.CameraPitch.HasValue
+                && !float.IsNaN(e.CameraYaw.Value)
+                && !float.IsInfinity(e.CameraYaw.Value)
+                && !float.IsNaN(e.CameraPitch.Value)
+                && !float.IsInfinity(e.CameraPitch.Value))
+            {
+                w.WriteFloatPresent(18, e.CameraYaw.Value);
+                w.WriteFloatPresent(19, e.CameraPitch.Value);
+            }
 
             // field 20: float game_thread_ms
             w.WriteFloat(20, e.GameThreadMs);
