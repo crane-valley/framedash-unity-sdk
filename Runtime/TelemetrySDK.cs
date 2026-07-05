@@ -23,11 +23,16 @@ namespace Framedash
         // event_name truncation is centralized in FieldClamp.TruncateEventName
         // (surrogate-pair safe); see FieldClamp.MaxEventNameLength.
 
+        // Code constant, deliberately NOT serialized: a [SerializeField] version
+        // would be captured into scenes/prefabs and deserialize the OLD value over
+        // this initializer after a package upgrade, leaving X-SDK-Version stale.
+        // Keep in sync with sdks/unity/package.json (release gotcha).
+        private const string SdkVersion = "0.1.2";
+
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";
         [SerializeField] private string _apiKey;
         [SerializeField] private string _buildId;
-        [SerializeField] private string _sdkVersion = "0.1.1";
         [SerializeField] private string _playerId;
         [SerializeField] private bool _captureCameraRotation = true;
 
@@ -43,6 +48,13 @@ namespace Framedash
 
         [Header("Sampling")]
         [SerializeField] [Range(0f, 1f)] private float _samplingRate = 1f;
+
+        [Header("Diagnostics")]
+        // Opt-in verbose transport logging (F29). When enabled, each batch send logs
+        // the endpoint + compressed payload size and each successful flush logs
+        // "Flushed N events (HTTP 202)". Off by default so a shipping game emits
+        // nothing on the happy path; integrators flip it on to confirm delivery.
+        [SerializeField] private bool _verboseLogging;
 
         [Header("Persistence")]
         // When enabled (default), events that cannot be sent (transient network failure
@@ -136,6 +148,29 @@ namespace Framedash
             }
         }
 
+        /// <summary>
+        /// Opt-in verbose transport logging (F29, default false). When true, each batch
+        /// send logs the endpoint + compressed payload size and each successful flush
+        /// logs "Flushed N events (HTTP 202)" -- a client-side delivery confirmation for
+        /// first-time integrators. Settable from code (e.g.
+        /// <c>TelemetrySDK.Instance.VerboseLogging = true;</c>); a runtime change is
+        /// propagated to the live transport, so it can be toggled after Initialize().
+        /// Leave off in shipping builds to avoid per-flush log spam.
+        /// </summary>
+        public bool VerboseLogging
+        {
+            get => _verboseLogging;
+            set
+            {
+                _verboseLogging = value;
+                // Propagate a runtime toggle to the live transport so flipping this in
+                // code (or the inspector) takes effect immediately instead of being
+                // frozen at the value captured when the session was initialized. No-op
+                // before init (applied when the transport is created).
+                if (_transport != null) _transport.VerboseLogging = value;
+            }
+        }
+
         /// <summary>Singleton instance. Created automatically if needed.</summary>
         public static TelemetrySDK Instance
         {
@@ -161,18 +196,34 @@ namespace Framedash
 
         /// <summary>
         /// Initialize the SDK with the given configuration.
-        /// Call this once at game startup (e.g., in a boot scene).
+        /// Call this once at game startup (e.g., in a boot scene). All parameters are
+        /// optional: a CI build can call the no-argument <c>TelemetrySDK.Initialize()</c>
+        /// to authenticate purely from the <c>FRAMEDASH_API_KEY</c> environment variable.
         /// </summary>
+        /// <param name="apiKey">
+        /// The Framedash ingest API key. Precedence: an explicit non-empty argument wins,
+        /// else a key configured in the Inspector, else the <c>FRAMEDASH_API_KEY</c>
+        /// environment variable (the CI path, consistent with the Framedash CLI). Passing
+        /// null or empty keeps the Inspector-configured key (if any) rather than clearing
+        /// it, so calling <c>Initialize(null, ...)</c> only to set other options does not
+        /// override an Inspector key with the environment. Initialization fails with a
+        /// logged error only when no source supplies a key.
+        /// </param>
         /// <param name="enableOfflineQueue">
         /// When true (default), unsent events are persisted to disk and retried next run.
         /// Pass false for a pure in-memory buffer with no disk writes -- the only way a
         /// code-only integration (which auto-creates the component) can opt out, since the
         /// inspector field is never seen.
         /// </param>
-        public static TelemetrySDK Initialize(string apiKey, string endpointUrl = null, string buildId = null, string playerId = null, bool enableOfflineQueue = true)
+        public static TelemetrySDK Initialize(string apiKey = null, string endpointUrl = null, string buildId = null, string playerId = null, bool enableOfflineQueue = true)
         {
             var sdk = Instance;
-            sdk._apiKey = apiKey;
+            // Only overwrite the configured key when an explicit non-empty argument is
+            // given. A null/empty apiKey means "keep whatever is configured" (e.g. an
+            // Inspector key) so a caller passing Initialize(null, ...) purely to set other
+            // options does not wipe the Inspector key and hand precedence to the env var.
+            // Precedence stays: explicit non-empty arg > Inspector field > FRAMEDASH_API_KEY.
+            if (!string.IsNullOrEmpty(apiKey)) sdk._apiKey = apiKey;
             if (!string.IsNullOrEmpty(endpointUrl)) sdk._endpointUrl = endpointUrl;
             if (!string.IsNullOrEmpty(buildId)) sdk._buildId = buildId;
             if (playerId != null) sdk._playerId = playerId;
@@ -194,11 +245,28 @@ namespace Framedash
 
         private void Start()
         {
+            // Auto-init only when a key is set in the Inspector. The FRAMEDASH_API_KEY
+            // env fallback (F32) is intentionally NOT consulted here: auto-initializing
+            // from the environment would race a later explicit Initialize("key") (Unity's
+            // Start() order is undefined), letting env win over an explicit key and
+            // violating the "explicit wins" precedence. Env-only (CI) integrations call
+            // Initialize() -- which applies the fallback in InitializeInternal -- exactly
+            // like the CLI consults FRAMEDASH_API_KEY when a command is invoked.
             if (!_initialized && !string.IsNullOrEmpty(_apiKey))
             {
                 InitializeInternal();
             }
         }
+
+        /// <summary>
+        /// Resolve the effective API key for initialization. An explicitly configured key
+        /// (Inspector field or <see cref="Initialize"/> argument) always wins; when none
+        /// is configured the <c>FRAMEDASH_API_KEY</c> environment variable is used as a CI
+        /// fallback. Precedence and naming match the Framedash CLI's <c>--api-key</c> vs
+        /// <c>FRAMEDASH_API_KEY</c> contract. Returns empty/null when neither is set.
+        /// </summary>
+        private string ResolveApiKey()
+            => ApiKeyResolver.Resolve(_apiKey, () => Environment.GetEnvironmentVariable("FRAMEDASH_API_KEY"));
 
         // Set after the first Update() / camera-sampling exception so a persistent
         // per-frame failure logs once (with the full exception) instead of flooding
@@ -283,9 +351,18 @@ namespace Framedash
         private void InitializeInternal()
         {
             if (_initialized) return;
-            if (string.IsNullOrEmpty(_apiKey))
+            // Resolve the effective key FRESH on every initialization (F32): the
+            // configured key (Inspector/explicit arg) wins, otherwise the CURRENT
+            // FRAMEDASH_API_KEY. Resolve into a LOCAL and never promote it into _apiKey --
+            // promoting the env value would freeze the first read, so a changed
+            // FRAMEDASH_API_KEY after Shutdown() + Initialize() in the same process would
+            // never be picked up and the config-vs-env precedence would blur. _apiKey
+            // stays the configured key only; effectiveApiKey feeds the transport and the
+            // offline-queue partition key below.
+            string effectiveApiKey = ResolveApiKey();
+            if (string.IsNullOrEmpty(effectiveApiKey))
             {
-                Debug.LogError("[Framedash] API key is required. Call TelemetrySDK.Initialize(apiKey).");
+                Debug.LogError("[Framedash] API key is required. Set it via TelemetrySDK.Initialize(apiKey), the Inspector, or the FRAMEDASH_API_KEY environment variable.");
                 return;
             }
 
@@ -335,7 +412,7 @@ namespace Framedash
             // the same install between local/staging/prod, or rotating keys, never resends
             // one project's events to another.
             _persistence = _offlineQueueActive
-                ? (IPersistenceProvider)new FilePersistence(FilePersistence.DefaultQueueFilePath(_endpointUrl + "\n" + _apiKey))
+                ? (IPersistenceProvider)new FilePersistence(FilePersistence.DefaultQueueFilePath(_endpointUrl + "\n" + effectiveApiKey))
                 : new NullPersistence();
             _pendingPersistedEventsToAck = 0;
             if (_offlineQueueActive)
@@ -352,7 +429,7 @@ namespace Framedash
             // means restore itself never drops, so this captures a clean starting point.
             _persistedDropBaseline = _buffer.DroppedCount;
 
-            _transport = new TransportLayer(_endpointUrl, _apiKey, _sdkVersion, _maxPayloadBytes);
+            _transport = new TransportLayer(_endpointUrl, effectiveApiKey, SdkVersion, _maxPayloadBytes, _verboseLogging);
             _session = new SessionManager(_playerId);
             _perfCollector = new PerformanceCollector();
             // Reset the camera snapshot so a re-init (Shutdown then Initialize) does
@@ -944,6 +1021,17 @@ namespace Framedash
                 Debug.LogError($"[Framedash] OnApplicationQuit() failed: {e}");
             }
         }
+
+#if UNITY_EDITOR
+        // Propagate an Inspector edit of _verboseLogging to the live transport. Unity
+        // writes a [SerializeField] private field directly (bypassing the VerboseLogging
+        // property setter), so without this an in-editor Play Mode toggle would not reach
+        // _transport. Editor-only (OnValidate never runs in a build) and no-op before init.
+        private void OnValidate()
+        {
+            if (_transport != null) _transport.VerboseLogging = _verboseLogging;
+        }
+#endif
 
         private void OnDestroy()
         {

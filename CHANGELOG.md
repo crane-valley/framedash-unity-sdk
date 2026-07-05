@@ -6,6 +6,62 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-05
+
+### Added
+
+- Opt-in verbose transport logging (F29, parity with the UE5 SDK's transport
+  logging): with `TelemetrySDK.VerboseLogging` enabled (Inspector toggle or the
+  `VerboseLogging` property, with live propagation to the transport; default off),
+  each send attempt logs the endpoint and gzip-compressed payload size, and each
+  accepted batch logs "Flushed N events (HTTP 202)" so first-time integrators can
+  positively confirm delivery client-side.
+- API-key environment-variable fallback for CI (F32): when no key is configured
+  via the Inspector or `TelemetrySDK.Initialize(apiKey, ...)`, the SDK falls back
+  to the `FRAMEDASH_API_KEY` environment variable (`ApiKeyResolver`), so a CI
+  build can authenticate without hardcoding a secret in the project. An
+  explicitly configured key always wins, matching the CLI's `--api-key` vs
+  `FRAMEDASH_API_KEY` precedence contract; the env read is lazy and fail-safe
+  (a sandboxed runtime that throws on environment access degrades to "no env
+  key" instead of surfacing an exception).
+- Prefer-IPv4-with-IPv6-fallback ingest connect (parity with the Godot SDK). When
+  the primary UnityWebRequest attempt fails at the transport level (network error /
+  timeout, `responseCode` 0), the transport resolves the endpoint to concrete IPv4
+  and IPv6 addresses and retries within the same flush over a direct TLS socket
+  pinned to the IPv4 literal first, falling back to IPv6 (and toggling family
+  across retries) only if IPv4 also fails at the transport level. TLS is
+  authenticated against the original hostname via
+  `SslStream.AuthenticateAsClient(fqdn)`, so SNI and full standard certificate
+  validation (chain, expiry, hostname) are preserved -- no custom certificate
+  logic -- and the request carries a `Host: <fqdn>` header so routing is unchanged.
+  This turns the previous fail-fast + persist behavior into active in-flush
+  delivery on broken-IPv6 networks (a global AAAA advertised via Router
+  Advertisement with no working IPv6 route). Loopback, IP-literal, and plain-HTTP
+  endpoints are unaffected (passthrough), a total DNS failure falls back to the
+  previous behavior, and WebGL builds are exempt (no sockets in the browser
+  sandbox; the offline queue remains the safety net there).
+  Attempt accounting: the retry budget (`RetryPolicy.MaxRetries`) bounds PRIMARY
+  UnityWebRequest attempts, and each transport-level primary failure may add one
+  direct-socket fallback POST within the same attempt -- worst case (total
+  blackout, both paths timing out every attempt) is 2 x MaxRetries POSTs and
+  roughly 20s wall time per attempt, in exchange for in-flush delivery whenever
+  either path works.
+
+### Changed
+
+- Transport whole-request timeout bounded 30s -> 10s. On a broken-IPv6 network (a
+  global AAAA advertised via Router Advertisement with no working route)
+  UnityWebRequest has no Happy Eyeballs, so an OS-resolver AAAA-first pick wedges
+  each flush connect; the shorter timeout fails fast instead of stalling 30s. The
+  offline queue (on by default) keeps the timed-out batch so it is retried on the
+  next run/initialization. Paired with the direct-socket IPv4 fallback above, the
+  timeout now bounds each primary attempt before the same flush actively retries
+  over IPv4; the persisted queue is the safety net only when both paths fail.
+- The SDK version reported via `X-SDK-Version` is now a code constant instead of
+  a serialized Inspector field. A `[SerializeField]` version was captured into
+  scenes/prefabs, so upgrading the package kept sending the OLD version from the
+  saved scene; the constant always matches the installed package.
+
 ## [0.1.1] - 2026-06-30
 
 ### Added

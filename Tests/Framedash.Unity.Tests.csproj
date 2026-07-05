@@ -30,6 +30,10 @@
     <Compile Include="RetryPolicyTests.cs" />
     <Compile Include="FlushPolicyTests.cs" />
     <Compile Include="PersistenceProviderTests.cs" />
+    <Compile Include="TransportLogTests.cs" />
+    <Compile Include="ApiKeyResolverTests.cs" />
+    <Compile Include="EndpointAddressPlannerTests.cs" />
+    <Compile Include="RawHttpMessageTests.cs" />
   </ItemGroup>
 
   <!-- Production source files from Runtime (engine-independent only) -->
@@ -48,6 +52,10 @@
     <Compile Include="..\Runtime\RetryPolicy.cs" Link="Runtime\RetryPolicy.cs" />
     <Compile Include="..\Runtime\FlushPolicy.cs" Link="Runtime\FlushPolicy.cs" />
     <Compile Include="..\Runtime\PersistenceProvider.cs" Link="Runtime\PersistenceProvider.cs" />
+    <Compile Include="..\Runtime\TransportLog.cs" Link="Runtime\TransportLog.cs" />
+    <Compile Include="..\Runtime\ApiKeyResolver.cs" Link="Runtime\ApiKeyResolver.cs" />
+    <Compile Include="..\Runtime\EndpointAddressPlanner.cs" Link="Runtime\EndpointAddressPlanner.cs" />
+    <Compile Include="..\Runtime\RawHttpMessage.cs" Link="Runtime\RawHttpMessage.cs" />
   </ItemGroup>
 
 </Project>
