@@ -27,7 +27,7 @@ namespace Framedash
         // would be captured into scenes/prefabs and deserialize the OLD value over
         // this initializer after a package upgrade, leaving X-SDK-Version stale.
         // Keep in sync with sdks/unity/package.json (release gotcha).
-        private const string SdkVersion = "0.1.2";
+        private const string SdkVersion = "0.1.3";
 
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";
@@ -111,6 +111,19 @@ namespace Framedash
         private long _cameraSnapshot = CameraMath.CameraAbsent;
         private const float HeartbeatIntervalSeconds = 10f;
         private float _timeSinceLastHeartbeat;
+        // Disk I/O window accumulator (manual feed + automatic engine source) and the
+        // optional automatic source. Drained on each perf_heartbeat into the io.* keys
+        // of the metrics map. _ioSource is null in release players / when the engine
+        // metrics API is unavailable; the manual feed (ReportIoSample) still works.
+        private IoStats _ioStats;
+        private IIoMetricsSource _ioSource;
+        private const string HeartbeatEventName = "perf_heartbeat";
+        // Map/level load-time helper (BeginMapLoad/EndMapLoad/ReportMapLoad). Holds
+        // the pending measurement and computes elapsed ms; the load time rides the
+        // metrics map as load_time_ms on a "map_load" event (no proto/CH change,
+        // mirroring the io.* attributes-map guardrail). Recreated on each (re-)init
+        // so a new session never completes a load begun by a prior one.
+        private MapLoadTimer _mapLoadTimer;
 
         /// <summary>Current session ID, or null if SDK is not initialized.</summary>
         public string SessionId
@@ -289,7 +302,7 @@ namespace Framedash
                 if (_timeSinceLastHeartbeat >= HeartbeatIntervalSeconds)
                 {
                     _timeSinceLastHeartbeat = 0f;
-                    TrackAutomated("perf_heartbeat");
+                    TrackAutomated(HeartbeatEventName);
                 }
             }
             catch (Exception e)
@@ -443,6 +456,14 @@ namespace Framedash
             _cachedEngineVersion = FieldClamp.Truncate(Application.unityVersion, FieldClamp.MaxEngineVersionLength);
 
             _timeSinceLastHeartbeat = 0f;
+            // Disk I/O: a fresh accumulator per session, plus the automatic engine
+            // source when available (development build / Editor + ENABLE_PROFILER).
+            // TryCreate calls StartCollectingMetrics under the hood and returns null
+            // (never throws) if the API is unavailable, in which case only the manual
+            // ReportIoSample feed contributes.
+            _ioStats = new IoStats();
+            _ioSource = AsyncReadManagerIoSource.TryCreate();
+            _mapLoadTimer = new MapLoadTimer();
             _flushCoroutine = StartCoroutine(FlushLoop());
             _initialized = true;
 
@@ -570,13 +591,22 @@ namespace Framedash
                 // Automated events (session_start, perf_heartbeat) bypass sampling,
                 // name validation, and player-ID checks — they are always valid and
                 // fired from internal SDK code after initialization succeeds.
+                //
+                // Disk I/O is attached to the perf_heartbeat ONLY: drain the window
+                // (folding in the automatic source delta) into the io.* metrics keys.
+                // Returns null until a source has ever been active, so an inert
+                // release build with no manual feed keeps metrics null (absent = not
+                // collected). session_start carries no metrics.
+                List<FloatPair> metrics = eventName == HeartbeatEventName
+                    ? IoHeartbeat.BuildMetrics(_ioSource, _ioStats)
+                    : null;
                 TrackInternal(
                     eventName,
                     mapId: "",
                     posX: 0f, posY: 0f, posZ: 0f,
                     source: TelemetrySource.Automated,
                     attributes: null,
-                    metrics: null);
+                    metrics: metrics);
             }
             catch (Exception e)
             {
@@ -677,6 +707,141 @@ namespace Framedash
                 return;
             }
             _session.SetPlayerId(playerId);
+        }
+
+        /// <summary>
+        /// Manually report a disk I/O sample. Use this in RELEASE players (where the
+        /// automatic AsyncReadManagerMetrics source is compiled out) or for custom
+        /// loaders / a virtual file system that the engine metrics do not see. The
+        /// sample accumulates into the current heartbeat window and is emitted, summed
+        /// with any automatic-source data, as the io.read_bytes / io.read_time_ms /
+        /// io.read_ops keys on the next perf_heartbeat. Thread-safe; negative or
+        /// non-finite components are dropped. Never throws.
+        /// </summary>
+        /// <param name="bytes">Bytes read since the last report.</param>
+        /// <param name="readTimeMs">Time spent reading, in milliseconds.</param>
+        /// <param name="ops">Number of read operations completed.</param>
+        public void ReportIoSample(long bytes, float readTimeMs, int ops)
+        {
+            try
+            {
+                // Gate on _initialized (not just a non-null accumulator): after
+                // Shutdown() _ioStats stays non-null, and accumulating into a dead
+                // session would waste memory/CPU until the next init.
+                if (!_initialized) return;
+                // Snapshot the field once: a concurrent re-init could swap it.
+                var stats = _ioStats;
+                if (stats == null) return; // not initialized yet -> silently ignore
+                stats.Add(bytes, readTimeMs, ops);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Framedash] ReportIoSample() failed: {e}");
+            }
+        }
+
+        // Monotonic wall-clock seconds from a high-resolution timer. Unaffected by
+        // Time.timeScale or a paused game (unlike Time.time / Time.deltaTime), so a
+        // load measured across a pause or slow-motion is still real elapsed time.
+        private static double MonotonicSeconds()
+            => (double)System.Diagnostics.Stopwatch.GetTimestamp()
+                / System.Diagnostics.Stopwatch.Frequency;
+
+        /// <summary>
+        /// Begin timing a map/level load. Records <paramref name="mapName"/> and a
+        /// monotonic start timestamp; call <see cref="EndMapLoad"/> when loading
+        /// completes to emit a <c>map_load</c> event whose <c>map_id</c> is deliberately
+        /// EMPTY (keeping it out of the spatial heatmap grid and the activation gate); the
+        /// map name rides <c>attributes["map_name"]</c> and the elapsed time rides the
+        /// <c>metrics["load_time_ms"]</c> metric. The clock is
+        /// wall-time monotonic (time-scale / pause safe). Calling BeginMapLoad again
+        /// before EndMapLoad REPLACES the pending measurement (the earlier one is
+        /// discarded). Main-thread only (pairs with <see cref="EndMapLoad"/>, whose event
+        /// emission reads main-thread-only Unity APIs). Never throws. No-op if the SDK is
+        /// not initialized.
+        /// </summary>
+        public void BeginMapLoad(string mapName)
+        {
+            try
+            {
+                if (!_initialized) return;
+                _mapLoadTimer.Begin(mapName, MonotonicSeconds());
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Framedash] BeginMapLoad() failed: {e}");
+            }
+        }
+
+        /// <summary>
+        /// Complete the map/level load started by <see cref="BeginMapLoad"/> and emit a
+        /// <c>map_load</c> event (map_id EMPTY; the stored map name in
+        /// <c>attributes["map_name"]</c>, elapsed milliseconds in
+        /// <c>metrics["load_time_ms"]</c>) via the normal Track path
+        /// (sampling, buffering, session attributes). No-op if no BeginMapLoad is pending
+        /// or the SDK is not initialized. Main-thread only: the emission goes through the
+        /// Track path, which reads main-thread-only Unity APIs (Time / Profiler); a call
+        /// from a worker thread (e.g. a custom loader completion) is swallowed fail-safe
+        /// but the event is lost. Never throws.
+        /// </summary>
+        public void EndMapLoad()
+        {
+            try
+            {
+                if (!_initialized) return;
+                if (!_mapLoadTimer.End(MonotonicSeconds(), out string mapName, out double elapsedMs))
+                    return;
+                TrackMapLoad(mapName, elapsedMs);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Framedash] EndMapLoad() failed: {e}");
+            }
+        }
+
+        /// <summary>
+        /// Directly report a map/level load time for developers who measure it themselves
+        /// (custom loaders / streaming), bypassing the Begin/End timer. Emits the same
+        /// <c>map_load</c> event shape (map_id EMPTY; <paramref name="mapName"/> in
+        /// <c>attributes["map_name"]</c>, <paramref name="loadTimeMs"/> in
+        /// <c>metrics["load_time_ms"]</c>). A NaN, Infinity, or
+        /// negative <paramref name="loadTimeMs"/> is DROPPED (the whole call, not clamped),
+        /// matching the manual metric-feed contract; the map name is clamped to the ingest
+        /// map_id cap. Main-thread only (same Track-path constraint as
+        /// <see cref="EndMapLoad"/>): dispatch back to the main thread after a
+        /// worker-thread load completes. Never throws. No-op if the SDK is not initialized.
+        /// </summary>
+        public void ReportMapLoad(string mapName, double loadTimeMs)
+        {
+            try
+            {
+                if (!_initialized) return;
+                if (!MapLoadTimer.IsValidLoadTimeMs(loadTimeMs)) return;
+                TrackMapLoad(mapName, loadTimeMs);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Framedash] ReportMapLoad() failed: {e}");
+            }
+        }
+
+        // Emit the map_load event through the public Track path so it inherits sampling,
+        // field/attribute clamping (finite-metric drop, attribute-value truncation),
+        // buffering, and CI session attributes -- it is a regular event, not a heartbeat.
+        // map_id is left EMPTY (like perf_heartbeat) so this non-spatial event never lands
+        // in the spatial heatmap grid query or the activation gate (both key on a non-empty
+        // map_id); the loaded map name rides attributes["map_name"] instead, clamped to the
+        // attribute-value cap by ClampAttributes. The load time rides metrics as
+        // load_time_ms (no proto/CH field). A finite double that overflows float range
+        // narrows to Infinity, which ClampMetrics would drop; skip it here so a map_load
+        // without its load_time_ms metric is never emitted.
+        private void TrackMapLoad(string mapName, double loadTimeMs)
+        {
+            float ms = (float)loadTimeMs;
+            if (float.IsInfinity(ms)) return;
+            var attributes = new Dictionary<string, string>(1) { { MapLoadTimer.KeyMapName, mapName ?? "" } };
+            var metrics = new Dictionary<string, float>(1) { { MapLoadTimer.KeyLoadTimeMs, ms } };
+            Track(MapLoadTimer.MapLoadEventName, mapId: "", attributes: attributes, metrics: metrics);
         }
 
         /// <summary>

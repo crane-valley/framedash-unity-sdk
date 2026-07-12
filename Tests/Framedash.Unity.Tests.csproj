@@ -22,6 +22,8 @@
     <Compile Include="EndpointSecurityTests.cs" />
     <Compile Include="EventBufferTests.cs" />
     <Compile Include="FieldClampTests.cs" />
+    <Compile Include="IoStatsTests.cs" />
+    <Compile Include="MapLoadTimerTests.cs" />
     <Compile Include="ProtobufWriterTests.cs" />
     <Compile Include="TelemetrySerializerTests.cs" />
     <Compile Include="SessionIdGeneratorTests.cs" />
@@ -43,6 +45,8 @@
     <Compile Include="..\Runtime\EndpointSecurity.cs" Link="Runtime\EndpointSecurity.cs" />
     <Compile Include="..\Runtime\EventBuffer.cs" Link="Runtime\EventBuffer.cs" />
     <Compile Include="..\Runtime\FieldClamp.cs" Link="Runtime\FieldClamp.cs" />
+    <Compile Include="..\Runtime\IoStats.cs" Link="Runtime\IoStats.cs" />
+    <Compile Include="..\Runtime\MapLoadTimer.cs" Link="Runtime\MapLoadTimer.cs" />
     <Compile Include="..\Runtime\ProtobufWriter.cs" Link="Runtime\ProtobufWriter.cs" />
     <Compile Include="..\Runtime\TelemetrySerializer.cs" Link="Runtime\TelemetrySerializer.cs" />
     <Compile Include="..\Runtime\TelemetryEvent.cs" Link="Runtime\TelemetryEvent.cs" />

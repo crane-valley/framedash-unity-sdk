@@ -6,6 +6,29 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-12
+
+### Added
+
+- Map/level load-time capture: `BeginMapLoad(mapName)` / `EndMapLoad()` time a
+  load on a monotonic, time-scale- and pause-safe clock, and
+  `ReportMapLoad(mapName, loadTimeMs)` lets self-measured loaders report a load
+  time directly. Both paths emit a `map_load` auto event carrying
+  `metrics["load_time_ms"]` and `attributes["map_name"]`; `map_id` is
+  deliberately left empty so the event stays out of the spatial heatmap grid
+  and the activation gate. `ReportMapLoad` drops (does not clamp) a NaN,
+  Infinity, or negative `loadTimeMs`. Calling `BeginMapLoad` again before
+  `EndMapLoad` replaces the pending measurement. Main-thread only; fail-safe
+  (never throws, no-op if the SDK is not initialized).
+- `io.*` disk metrics: the SDK auto-attaches `io.read_bytes` / `io.read_time_ms`
+  / `io.read_ops` (deltas since the previous heartbeat) to `perf_heartbeat`
+  metrics, sourced from Unity's `AsyncReadManagerMetrics` API in editor and
+  development builds only (unavailable in release players, where only the
+  manual feed contributes). `ReportIoSample(bytes, readTimeMs, ops)` is
+  available on every build target for developers who want to feed their own
+  disk-I/O reads; the attach only happens once a sample -- automatic or
+  manual -- has actually landed (no zero-stuffing for unused feeds).
+
 ## [0.1.2] - 2026-07-05
 
 ### Added

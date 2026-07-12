@@ -14,7 +14,7 @@ Add via Unity Package Manager using the git URL:
 https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
-To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.2`.
+To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.3`.
 
 ## In-Editor Quickstart (fastest first activation)
 
@@ -68,13 +68,92 @@ The SDK automatically sends the following events with `Source=Automated`. These 
 | Event | Trigger | Description |
 |-------|---------|-------------|
 | `session_start` | Once, on initialization | Guarantees the backend sees at least one event per session |
-| `perf_heartbeat` | Every 10 seconds | Continuous performance baseline (FPS, frame time, GPU time, memory) |
+| `perf_heartbeat` | Every 10 seconds | Continuous performance baseline (FPS, frame time, GPU time, memory); optionally carries disk I/O (`io.*`, see below) |
 
 Both events include full performance metrics from `PerformanceCollector`. The heartbeat timer uses `Time.unscaledDeltaTime`, so it continues during `timeScale=0` (pause menus).
 
 ## Performance Collection
 
 `PerformanceCollector.cs` uses `Time.unscaledDeltaTime * 1000f` for `frame_time_ms` (timeScale-independent). See [Frame Timing Metrics Guide](../../docs/en/frame-timing-metrics.md) for details on available metrics and collection APIs.
+
+## Disk I/O Metrics
+
+To make asset-loading-induced frame drops visible, the `perf_heartbeat` event can
+carry disk I/O window totals (bytes read, read time, and read-operation count
+since the previous heartbeat) in the generic metrics map:
+
+| Metric key | Meaning |
+|------------|---------|
+| `io.read_bytes` | Bytes read during the window |
+| `io.read_time_ms` | Total read time during the window (ms) |
+| `io.read_ops` | Number of read operations completed during the window |
+
+These keys are attached **only when a source has ever been active**; a build that
+collects no I/O leaves them off entirely (absent = not collected, unlike the
+always-present frame/memory fields). Query them via the data-export / query REST
+API (e.g. `metrics['io.read_bytes']`); there is no dedicated proto or ClickHouse
+column yet, and the `framedash perf-diff` CLI gate does **not** compare `io.*` today
+(it covers `frame_time` / `memory` / `gpu_time` only -- `io.*` comparison is Phase 2).
+
+- **Automatic capture (development builds / Editor only).** The SDK reads Unity's
+  `AsyncReadManagerMetrics` (engine loader I/O: AssetBundles, Resources, scene and
+  streaming loads). This API only exists under the `ENABLE_PROFILER` define, so it
+  is compiled out of release players and no automatic I/O is collected there. In
+  the Editor, launch with `-enable-file-read-metrics` for full coverage. Any engine
+  call is wrapped so an unsupported platform simply collects nothing -- it never
+  throws.
+
+  Interop: the metrics buffer is process-global, so the SDK reads it
+  **non-destructively** (cumulative, computing its own per-heartbeat deltas) and
+  never clears it -- a host game or profiling tool that also reads the metrics is
+  not disturbed. It calls `StartCollectingMetrics()` once (idempotent) but never
+  `StopCollectingMetrics()` (another consumer may have started collection first).
+  Leaving collection on carries a small metrics-buffer memory overhead, in dev
+  builds / the Editor only. If the host itself clears the metrics, the affected
+  heartbeat window is under-counted (re-baselined), never garbage.
+- **Manual feed (works everywhere, including release players).** Report your own
+  samples -- for a release build, a custom loader, or a virtual file system the
+  engine metrics do not see -- and they accumulate into the same heartbeat window:
+
+  ```csharp
+  // Call whenever your loader finishes reads (any thread; never throws).
+  TelemetrySDK.Instance.ReportIoSample(bytes: 4096, readTimeMs: 8f, ops: 1);
+  ```
+
+  Negative or non-finite components are dropped. Automatic and manual data are
+  summed within the same window.
+
+## Map/Level Load-Time
+
+Measure how long a level/scene takes to load and emit it as a `map_load` event.
+The load time rides the generic metrics map (`load_time_ms`) and the loaded map
+name rides the attributes map as `attributes["map_name"]`. `map_id` is left **empty**
+on purpose (like `perf_heartbeat`): a `map_load` has no world position, so an empty
+`map_id` keeps it out of the spatial heatmap and the activation gate, which key on a
+non-empty `map_id`. There is no dedicated proto or ClickHouse column yet (web/CLI
+charts, grouped by `attributes['map_name']`, and `perf-diff` gating land in a
+follow-up PR). Query it today via the data-export / query REST API (e.g.
+`metrics['load_time_ms']`). The event flows through the normal `Track` path, so it is
+sampled and buffered like any other event.
+
+```csharp
+// Time a load with the built-in timer:
+TelemetrySDK.Instance.BeginMapLoad("world_1");
+// ... load the scene ...
+TelemetrySDK.Instance.EndMapLoad();   // emits map_load (map_name="world_1", load_time_ms=elapsed)
+
+// Or report a time you measured yourself (custom/streaming loaders):
+TelemetrySDK.Instance.ReportMapLoad("world_1", loadTimeMs: 842.0);
+```
+
+The timer uses a monotonic wall clock, so a paused game or changed `Time.timeScale`
+does not distort the measurement. Calling `BeginMapLoad` again before `EndMapLoad`
+replaces the pending measurement; `EndMapLoad` with no pending `BeginMapLoad` is a
+no-op. A NaN/Infinity/negative `ReportMapLoad` time is dropped (not clamped). All
+three methods never throw and are no-ops before `Initialize()`. Call them on Unity's
+main thread (like `Track()`, the emission reads main-thread-only Unity APIs) -- if a
+custom loader completes on a worker thread, dispatch `EndMapLoad`/`ReportMapLoad`
+back to the main thread.
 
 ## Field Limits
 
