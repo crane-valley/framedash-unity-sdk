@@ -20,9 +20,12 @@
     <Compile Include="BatchPolicyTests.cs" />
     <Compile Include="CameraMathTests.cs" />
     <Compile Include="EndpointSecurityTests.cs" />
+    <Compile Include="FramedashEditorEndpointSecurityTests.cs" />
+    <Compile Include="FramedashEditorLogicTests.cs" />
     <Compile Include="EventBufferTests.cs" />
     <Compile Include="FieldClampTests.cs" />
     <Compile Include="IoStatsTests.cs" />
+    <Compile Include="MemoryStatsTests.cs" />
     <Compile Include="MapLoadTimerTests.cs" />
     <Compile Include="ProtobufWriterTests.cs" />
     <Compile Include="TelemetrySerializerTests.cs" />
@@ -46,6 +49,7 @@
     <Compile Include="..\Runtime\EventBuffer.cs" Link="Runtime\EventBuffer.cs" />
     <Compile Include="..\Runtime\FieldClamp.cs" Link="Runtime\FieldClamp.cs" />
     <Compile Include="..\Runtime\IoStats.cs" Link="Runtime\IoStats.cs" />
+    <Compile Include="..\Runtime\MemoryStats.cs" Link="Runtime\MemoryStats.cs" />
     <Compile Include="..\Runtime\MapLoadTimer.cs" Link="Runtime\MapLoadTimer.cs" />
     <Compile Include="..\Runtime\ProtobufWriter.cs" Link="Runtime\ProtobufWriter.cs" />
     <Compile Include="..\Runtime\TelemetrySerializer.cs" Link="Runtime\TelemetrySerializer.cs" />
@@ -60,6 +64,8 @@
     <Compile Include="..\Runtime\ApiKeyResolver.cs" Link="Runtime\ApiKeyResolver.cs" />
     <Compile Include="..\Runtime\EndpointAddressPlanner.cs" Link="Runtime\EndpointAddressPlanner.cs" />
     <Compile Include="..\Runtime\RawHttpMessage.cs" Link="Runtime\RawHttpMessage.cs" />
+    <Compile Include="..\Editor\FramedashEditorEndpointSecurity.cs" Link="Editor\FramedashEditorEndpointSecurity.cs" />
+    <Compile Include="..\Editor\FramedashEditorLogic.cs" Link="Editor\FramedashEditorLogic.cs" />
   </ItemGroup>
 
 </Project>

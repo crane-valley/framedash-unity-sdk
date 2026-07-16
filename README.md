@@ -14,7 +14,7 @@ Add via Unity Package Manager using the git URL:
 https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
-To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.3`.
+To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.4`.
 
 ## In-Editor Quickstart (fastest first activation)
 
@@ -68,7 +68,7 @@ The SDK automatically sends the following events with `Source=Automated`. These 
 | Event | Trigger | Description |
 |-------|---------|-------------|
 | `session_start` | Once, on initialization | Guarantees the backend sees at least one event per session |
-| `perf_heartbeat` | Every 10 seconds | Continuous performance baseline (FPS, frame time, GPU time, memory); optionally carries disk I/O (`io.*`, see below) |
+| `perf_heartbeat` | Every 10 seconds | Continuous performance baseline (FPS, frame time, GPU time, memory); optionally carries disk I/O (`io.*`) and extra memory readings (`mem.*`, see below) |
 
 Both events include full performance metrics from `PerformanceCollector`. The heartbeat timer uses `Time.unscaledDeltaTime`, so it continues during `timeScale=0` (pause menus).
 
@@ -122,6 +122,42 @@ column yet, and the `framedash perf-diff` CLI gate does **not** compare `io.*` t
 
   Negative or non-finite components are dropped. Automatic and manual data are
   summed within the same window.
+
+## Memory Metrics
+
+Two additional memory readings can ride the generic metrics map:
+
+| Metric key | Meaning |
+|------------|---------|
+| `mem.vram` | Graphics driver memory allocation, in bytes (`Profiler.GetAllocatedMemoryForGraphicsDriver()`) |
+| `mem.heap` | Managed (Mono/IL2CPP) heap bytes in use (`Profiler.GetMonoUsedSizeLong()`) |
+
+Each key is attached **only when the underlying API reports a positive value**;
+a platform/build where the API returns 0 (unsupported, or a non-development
+player for the driver reading) omits that key entirely (absent = not collected,
+same rule as `io.*`). Query them via the data-export / query REST API (e.g.
+`metrics['mem.vram']`); there is no dedicated proto or ClickHouse column, and
+these are separate from the always-present `memory_used_bytes` Tier-1 field
+(`Profiler.GetTotalAllocatedMemoryLong()`) reported by `PerformanceCollector`.
+
+**Dual attach path.** `perf_heartbeat` carries an empty `map_id` and no
+position, so it never reaches the spatial heatmap grid query (which requires
+`map_id` + cell bounds). To make `mem.*` visible on the heatmap, the SDK also
+attaches it to **position-qualified `Track()` calls** -- any call with a
+non-empty `mapId` argument:
+
+- The values are sampled from `Profiler` **only on `perf_heartbeat`** (every
+  ~10s) and cached; position-qualified events attach the cached reading rather
+  than sampling again, so the per-event path never calls into `Profiler` (cheap:
+  only cached floats and precomputed key strings).
+- The cache is also eagerly sampled once at `Initialize()`, so a
+  position-qualified event fired in the first ~10s of a session (before the
+  first heartbeat) is not left blind.
+- Events with an empty `map_id` (other than `perf_heartbeat` itself, e.g.
+  `session_start`, `map_load`) never get `mem.*`.
+- If your own `Track()` call supplies a metric with the same key name
+  (`mem.vram` / `mem.heap`), your value wins -- the cached reading is never
+  appended on top of it.
 
 ## Map/Level Load-Time
 

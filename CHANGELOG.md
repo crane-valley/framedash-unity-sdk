@@ -6,6 +6,32 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-17
+
+### Added
+
+- Memory-category metrics: the SDK auto-attaches `mem.vram` (allocated
+  graphics-driver memory via `Profiler.GetAllocatedMemoryForGraphicsDriver`)
+  and `mem.heap` (managed heap via `Profiler.GetMonoUsedSizeLong`) to
+  `perf_heartbeat` metrics and to position-qualified events (non-empty
+  `map_id`; a cached sample refreshed at heartbeat cadence -- the event path
+  does no engine reads). Absent means not collected: a zero reading is
+  omitted, never emitted as a fabricated 0. Caller-supplied metric keys
+  always win, both on key collision and on capacity -- `mem.*` fills only
+  the remaining slots below the 50-metric ingest cap, with `mem.vram`
+  taking priority when capacity is partial, so an event that already
+  carries 50 caller metrics behaves exactly as before.
+- In-editor SceneView cloud heatmap overlay: a new editor-only
+  `Framedash.Editor` assembly fetches the project's maps and aggregated
+  heatmap cells from the Framedash REST API (requires a Read API Key with
+  the `analytics:read` scope plus the Project ID -- never the game's
+  write-only ingest key) and renders translucent heatmap quads in the
+  SceneView at the recorded world coordinates. Overlay settings persist
+  per-project via `ScriptableSingleton` under `UserSettings/` (never
+  packaged, never VCS-tracked). Editor HTTP fetches are bounded by a 30s
+  timeout, and quad geometry is built once per data load into a cached
+  mesh drawn with a single call per repaint.
+
 ## [0.1.3] - 2026-07-12
 
 ### Added

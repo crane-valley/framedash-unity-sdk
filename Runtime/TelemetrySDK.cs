@@ -27,7 +27,7 @@ namespace Framedash
         // would be captured into scenes/prefabs and deserialize the OLD value over
         // this initializer after a package upgrade, leaving X-SDK-Version stale.
         // Keep in sync with sdks/unity/package.json (release gotcha).
-        private const string SdkVersion = "0.1.3";
+        private const string SdkVersion = "0.1.4";
 
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";
@@ -117,6 +117,16 @@ namespace Framedash
         // metrics API is unavailable; the manual feed (ReportIoSample) still works.
         private IoStats _ioStats;
         private IIoMetricsSource _ioSource;
+        // Memory readings (mem.vram, mem.heap): sampled fresh only on perf_heartbeat --
+        // no windowing needed since Profiler exposes instantaneous totals, unlike the
+        // cumulative io.* counters. Always non-null (the Profiler APIs are safe to
+        // call in a release player); omission of a key happens inside MemoryMetricsCache.
+        private readonly IMemoryMetricsSource _memSource = new UnityMemoryMetricsSource();
+        // Caches the heartbeat's reading so position-qualified Track() events (a
+        // non-empty map id) can also carry mem.* for the spatial heatmap grid, which
+        // perf_heartbeat itself never reaches (empty map_id, no position). The
+        // per-event path only reads this cache -- never Profiler directly.
+        private readonly MemoryMetricsCache _memCache = new MemoryMetricsCache();
         private const string HeartbeatEventName = "perf_heartbeat";
         // Map/level load-time helper (BeginMapLoad/EndMapLoad/ReportMapLoad). Holds
         // the pending measurement and computes elapsed ms; the load time rides the
@@ -463,6 +473,12 @@ namespace Framedash
             // ReportIoSample feed contributes.
             _ioStats = new IoStats();
             _ioSource = AsyncReadManagerIoSource.TryCreate();
+            // Eager first sample at init (rather than a lazy sample on the first
+            // qualifying event) so a position-qualified Track() call in the first
+            // ~10s of a session -- before the first heartbeat -- is not blind. This
+            // is a one-time init cost, not a per-event one, so it does not conflict
+            // with the "no Profiler calls on the per-event path" rule below.
+            _memCache.Refresh(_memSource);
             _mapLoadTimer = new MapLoadTimer();
             _flushCoroutine = StartCoroutine(FlushLoop());
             _initialized = true;
@@ -568,9 +584,22 @@ namespace Framedash
                 List<StringPair> attrList = FieldClamp.ClampAttributes(attributes);
                 List<FloatPair> metricList = FieldClamp.ClampMetrics(metrics);
 
+                string safeMapId = FieldClamp.Truncate(mapId ?? "", FieldClamp.MaxMapIdLength);
+
+                // Position-qualified events (non-empty map id) also carry the cached
+                // mem.* reading so the spatial heatmap grid query (map_id + cell bounds)
+                // sees real memory data -- perf_heartbeat alone has an empty map_id and
+                // never reaches that grid. Attaches from the cache only (refreshed at
+                // heartbeat cadence in TrackAutomated): no Profiler call on this per-event
+                // path. A caller-supplied metric of the same key name is never clobbered.
+                if (safeMapId.Length > 0)
+                {
+                    metricList = _memCache.AppendTo(metricList);
+                }
+
                 TrackInternal(
                     safeEventName,
-                    FieldClamp.Truncate(mapId ?? "", FieldClamp.MaxMapIdLength),
+                    safeMapId,
                     FieldClamp.SanitizeCoord(position?.x ?? 0f),
                     FieldClamp.SanitizeCoord(position?.y ?? 0f),
                     FieldClamp.SanitizeCoord(position?.z ?? 0f),
@@ -592,14 +621,21 @@ namespace Framedash
                 // name validation, and player-ID checks — they are always valid and
                 // fired from internal SDK code after initialization succeeds.
                 //
-                // Disk I/O is attached to the perf_heartbeat ONLY: drain the window
-                // (folding in the automatic source delta) into the io.* metrics keys.
-                // Returns null until a source has ever been active, so an inert
-                // release build with no manual feed keeps metrics null (absent = not
-                // collected). session_start carries no metrics.
-                List<FloatPair> metrics = eventName == HeartbeatEventName
-                    ? IoHeartbeat.BuildMetrics(_ioSource, _ioStats)
-                    : null;
+                // Disk I/O and memory are BUILT on the perf_heartbeat ONLY: drain the io
+                // window (folding in the automatic source delta) into the io.* metrics
+                // keys, refresh the memory cache with a fresh Profiler read, then append
+                // mem.* into the same list. Both stages omit their keys entirely when
+                // unavailable (absent = not collected), so an inert release build with
+                // no manual io feed and no mem support keeps metrics null. session_start
+                // carries no metrics. The refreshed _memCache is also what position-
+                // qualified Track() events attach (see Track()) until the next
+                // heartbeat -- so this is the only place mem.* is ever sampled.
+                List<FloatPair> metrics = null;
+                if (eventName == HeartbeatEventName)
+                {
+                    _memCache.Refresh(_memSource);
+                    metrics = _memCache.AppendTo(IoHeartbeat.BuildMetrics(_ioSource, _ioStats));
+                }
                 TrackInternal(
                     eventName,
                     mapId: "",

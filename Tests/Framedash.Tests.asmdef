@@ -3,6 +3,7 @@
 	"rootNamespace": "Framedash.Tests",
 	"references": [
 		"Framedash.Runtime",
+		"Framedash.Editor",
 		"UnityEngine.TestRunner",
 		"UnityEditor.TestRunner"
 	],
