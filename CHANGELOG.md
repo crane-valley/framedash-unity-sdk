@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-20
+
+### Fixed
+
+- A full in-memory buffer no longer evicts restored offline-queue events before
+  they are acknowledged. While a durable prefix is pending, new events are
+  rejected at capacity so positional disk acknowledgements cannot target the
+  wrong events or make shutdown discard an unpersisted fresh tail.
+
 ## [0.1.4] - 2026-07-17
 
 ### Added

@@ -14,6 +14,7 @@ namespace Framedash
         private int _tail;
         private int _count;
         private int _droppedCount;
+        private int _rejectedNewestCount;
         public static readonly int DefaultCapacity = 10000;
         private const int DropLogInterval = 100;
 
@@ -47,8 +48,33 @@ namespace Framedash
         /// <summary>Add an event. Drops oldest if full.</summary>
         public void Enqueue(TelemetryEvent evt)
         {
+            EnqueueInternal(evt, preserveOldestWhenFull: false);
+        }
+
+        /// <summary>
+        /// Add an event without evicting the oldest entry when the buffer is full.
+        /// </summary>
+        /// <returns>False when the incoming event was rejected.</returns>
+        internal bool TryEnqueuePreservingOldest(TelemetryEvent evt)
+        {
+            return EnqueueInternal(evt, preserveOldestWhenFull: true);
+        }
+
+        private bool EnqueueInternal(TelemetryEvent evt, bool preserveOldestWhenFull)
+        {
             lock (_lock)
             {
+                if (_count == _buffer.Length && preserveOldestWhenFull)
+                {
+                    _rejectedNewestCount++;
+                    if (_rejectedNewestCount % DropLogInterval == 1)
+                    {
+                        Debug.LogWarning(
+                            $"[Framedash] Event buffer full with a durable prefix — {_rejectedNewestCount} incoming event(s) rejected so far.");
+                    }
+                    return false;
+                }
+
                 _buffer[_tail] = evt;
                 _tail = (_tail + 1) % _buffer.Length;
 
@@ -67,6 +93,8 @@ namespace Framedash
                 {
                     _count++;
                 }
+
+                return true;
             }
         }
 

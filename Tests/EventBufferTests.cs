@@ -65,6 +65,26 @@ namespace Framedash.Tests
         }
 
         [Test]
+        public void TryEnqueuePreservingOldest_WhenFull_RejectsIncomingEvent()
+        {
+            var buffer = new EventBuffer(3);
+            buffer.Enqueue(new TelemetryEvent { EventName = "persisted-a" });
+            buffer.Enqueue(new TelemetryEvent { EventName = "persisted-b" });
+            buffer.Enqueue(new TelemetryEvent { EventName = "fresh-c" });
+
+            bool accepted = buffer.TryEnqueuePreservingOldest(
+                new TelemetryEvent { EventName = "fresh-d" });
+
+            Assert.That(accepted, Is.False);
+            Assert.That(buffer.DequeueAll().Select(evt => evt.EventName), Is.EqualTo(new[]
+            {
+                "persisted-a",
+                "persisted-b",
+                "fresh-c",
+            }));
+        }
+
+        [Test]
         public void Count_ReflectsEnqueuedItems()
         {
             var buffer = new EventBuffer(10);

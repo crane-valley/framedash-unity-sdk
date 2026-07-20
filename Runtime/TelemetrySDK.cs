@@ -27,7 +27,7 @@ namespace Framedash
         // would be captured into scenes/prefabs and deserialize the OLD value over
         // this initializer after a package upgrade, leaving X-SDK-Version stale.
         // Keep in sync with sdks/unity/package.json (release gotcha).
-        private const string SdkVersion = "0.1.4";
+        private const string SdkVersion = "0.1.5";
 
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";
@@ -717,7 +717,21 @@ namespace Framedash
                 CameraPitch = camPitch,
             };
 
-            _buffer.Enqueue(evt);
+            bool preservePersistedPrefix = _offlineQueueActive
+                && Volatile.Read(ref _pendingPersistedEventsToAck) > 0;
+            if (preservePersistedPrefix && !_buffer.TryEnqueuePreservingOldest(evt))
+            {
+                // The on-disk queue is positional, so overwriting its in-memory head would
+                // make a later DropOldest acknowledge a different event. Let the main-thread
+                // flush make room instead of doing disk I/O on the caller's Track path.
+                _flushRequested = true;
+                return;
+            }
+
+            if (!preservePersistedPrefix)
+            {
+                _buffer.Enqueue(evt);
+            }
 
             // Estimate payload size for flush threshold check.
             // Flag a flush when batch size or payload threshold is reached.
