@@ -6,6 +6,15 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-07-22
+
+### Added
+
+- The editor heatmap can read its `analytics:read` key from
+  `FRAMEDASH_ANALYTICS_API_KEY` when the per-project Read API Key is empty. The
+  environment value is used only by the current Unity process and is never
+  persisted under `UserSettings/`; an explicitly configured key still wins.
+
 ## [0.1.5] - 2026-07-20
 
 ### Fixed

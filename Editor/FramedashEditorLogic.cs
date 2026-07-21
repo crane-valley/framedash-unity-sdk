@@ -7,6 +7,12 @@ namespace Framedash.Editor.Logic
 {
     public static class FramedashEditorLogic
     {
+        public static string ResolveReadApiKey(string configuredValue, string environmentValue)
+        {
+            string configured = (configuredValue ?? "").Trim();
+            return configured.Length > 0 ? configured : (environmentValue ?? "").Trim();
+        }
+
         public sealed class MapInfo
         {
             public string Id;

@@ -14,7 +14,7 @@ Add via Unity Package Manager using the git URL:
 https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
-To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.5`.
+To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.6`.
 
 ## In-Editor Quickstart (fastest first activation)
 

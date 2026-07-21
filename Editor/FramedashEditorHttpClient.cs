@@ -180,7 +180,9 @@ namespace Framedash.Editor
             {
                 baseUrl = baseUrl.Substring(0, baseUrl.Length - 1);
             }
-            apiKey = (settings.ReadApiKey ?? "").Trim();
+            apiKey = FramedashEditorLogic.ResolveReadApiKey(
+                settings.ReadApiKey,
+                Environment.GetEnvironmentVariable("FRAMEDASH_ANALYTICS_API_KEY"));
             projectId = (settings.ProjectId ?? "").Trim();
             if (baseUrl.Length == 0)
             {
@@ -194,7 +196,7 @@ namespace Framedash.Editor
             }
             if (apiKey.Length == 0)
             {
-                error = "Configure an analytics:read API key.";
+                error = "Configure an analytics:read API key or set FRAMEDASH_ANALYTICS_API_KEY before launching Unity.";
                 return false;
             }
             if (projectId.Length == 0)
