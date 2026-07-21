@@ -21,6 +21,21 @@ namespace Framedash.Tests
             + "\"avg_fps\":59.5,\"avg_frame_time\":16.8,\"avg_memory\":512,"
             + "\"avg_gpu_time\":4.25,\"avg_mem_vram\":256}";
 
+        [TestCase("configured-key", "environment-key", "configured-key")]
+        [TestCase("  configured-key  ", "environment-key", "configured-key")]
+        [TestCase("", "environment-key", "environment-key")]
+        [TestCase("   ", "  environment-key  ", "environment-key")]
+        [TestCase(null, null, "")]
+        public void ResolveReadApiKey_ConfiguredValueWinsWithoutPersistingEnvironmentValue(
+            string configured,
+            string environment,
+            string expected)
+        {
+            Assert.That(
+                FramedashEditorLogic.ResolveReadApiKey(configured, environment),
+                Is.EqualTo(expected));
+        }
+
         [Test]
         public void ParseMapsResponse_MultipleMapsWithZBounds_ReturnsMaps()
         {

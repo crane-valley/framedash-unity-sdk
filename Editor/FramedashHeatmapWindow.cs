@@ -25,6 +25,7 @@ namespace Framedash.Editor
         private int _queryRevision;
         private bool _busy;
         private bool _isLive;
+        private bool _hasEnvironmentReadApiKey;
         private string _status = "Configure a read key and project, then refresh maps.";
         private Vector2 _scrollPosition;
 
@@ -39,6 +40,8 @@ namespace Framedash.Editor
             try
             {
                 _isLive = true;
+                _hasEnvironmentReadApiKey = !string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable("FRAMEDASH_ANALYTICS_API_KEY"));
                 _settings = FramedashHeatmapSettings.instance;
                 _httpClient = new FramedashEditorHttpClient();
                 _overlay = new FramedashHeatmapOverlay();
@@ -100,6 +103,13 @@ namespace Framedash.Editor
                 _settings.ReadApiKey = readApiKey;
                 _settings.Persist();
                 HandleConnectionSettingsChanged();
+            }
+            if (string.IsNullOrWhiteSpace(_settings.ReadApiKey)
+                && _hasEnvironmentReadApiKey)
+            {
+                EditorGUILayout.HelpBox(
+                    "Using FRAMEDASH_ANALYTICS_API_KEY from the Unity process. The value is not saved.",
+                    MessageType.Info);
             }
 
             EditorGUI.BeginChangeCheck();
