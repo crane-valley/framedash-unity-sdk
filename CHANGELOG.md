@@ -6,6 +6,33 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-07-24
+
+### Added
+
+- The in-editor SceneView heatmap now requests opt-in XYZ aggregation and renders
+  measured telemetry height as translucent voxels using the same five-stop
+  blue-to-red palette as the UE5 editor overlay. Older API responses without
+  `z` remain visible as flat cells at the configured map floor.
+- A SceneView **Framedash Heatmap** overlay now exposes independent **Show**,
+  **Frame**, and **Controls** actions. The controls include a Frame Heatmap button,
+  a five-stop intensity legend, cell count, and maximum weight.
+
+### Changed
+
+- The selected map and overlay preference now persist per project. The controls
+  restore the map list after reopening and refetch an enabled heatmap after script
+  reloads, while closing the controls window no longer destroys the SceneView mesh.
+- Map selection and refresh controls now stack vertically, preserving full map
+  names in narrow docked layouts, and the cached map-label array avoids repaint-time
+  allocations.
+
+### Fixed
+
+- The standalone NUnit project writes build artifacts under Unity-ignored
+  `Tests/.dotnet/`, preventing a local `dotnet test` run from importing test-host
+  assemblies into a consuming Unity project.
+
 ## [0.1.6] - 2026-07-22
 
 ### Added

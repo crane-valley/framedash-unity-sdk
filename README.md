@@ -14,7 +14,7 @@ Add via Unity Package Manager using the git URL:
 https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
-To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.6`.
+To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.7`.
 
 ## In-Editor Quickstart (fastest first activation)
 
@@ -46,6 +46,32 @@ they count toward activation. The sample's logic is **Editor-only** (every membe
 wrapped in `#if UNITY_EDITOR`), so it is stripped from player builds and never sends
 telemetry from a game; only an inert empty component remains if you leave it attached.
 See `Samples~/InEditorQuickstart/README.md` for the full walkthrough.
+
+## In-Editor Cloud Heatmap
+
+Open **Window > Framedash Heatmap** to inspect aggregated cloud telemetry directly
+in the SceneView without entering Play mode. Configure a Read API Key with the
+`analytics:read` scope and the Project ID, refresh the map list, select a map, then
+click **Fetch** and enable the overlay.
+
+The editor requests XYZ aggregation automatically. Cells with a measured `z`
+coordinate render as translucent voxels centered on that recorded height; an older
+server response without `z` remains visible as a flat cell at the map's minimum Z.
+The mesh is cached when data is fetched and drawn once per SceneView repaint. It is
+suppressed while the Editor is in Play mode and resumes afterward if the overlay
+toggle is still enabled.
+
+The **Framedash Heatmap** SceneView overlay provides **Show**, **Frame**, and
+**Controls** actions. Closing the controls window does not remove a loaded overlay;
+**Frame** focuses the SceneView on its current bounds. The selected map and overlay
+preference persist per project, and an open controls window restores its map list
+and refetches enabled heatmap data after a script/domain reload. The controls also
+show the cell count, maximum weight, and the low-to-high color legend. Map selection
+and refresh controls stack vertically so names remain readable in narrow docks.
+
+Framedash uses the recorded Unity `Vector3` components directly: telemetry X/Y/Z
+maps to SceneView X/Y/Z without a ground-plane axis remap. Use **Z Offset** only to
+apply a deliberate display translation; it does not rewrite cloud coordinates.
 
 ## Components
 

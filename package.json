@@ -1,6 +1,6 @@
 {
 	"name": "com.framedash.sdk",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"displayName": "Framedash Telemetry SDK",
 	"description": "Game telemetry SDK for Framedash analytics platform",
 	"unity": "2022.3",
