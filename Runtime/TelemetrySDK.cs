@@ -27,7 +27,7 @@ namespace Framedash
         // would be captured into scenes/prefabs and deserialize the OLD value over
         // this initializer after a package upgrade, leaving X-SDK-Version stale.
         // Keep in sync with sdks/unity/package.json (release gotcha).
-        private const string SdkVersion = "0.1.6";
+        private const string SdkVersion = "0.1.7";
 
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";

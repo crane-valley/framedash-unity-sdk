@@ -19,6 +19,8 @@ namespace Framedash.Editor
         public string EventNameFilter = "";
         public float OverlayOpacity = 0.6f;
         public float ZOffset = 0f;
+        public string SelectedMapId = "";
+        public bool OverlayEnabled;
 
         public void Persist()
         {

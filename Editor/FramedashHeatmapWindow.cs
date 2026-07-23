@@ -14,13 +14,11 @@ namespace Framedash.Editor
         private static readonly string[] AllowedDaysLabels = { "1", "7", "14", "30" };
         private static readonly string[] AllowedCellSizesLabels = { "5", "10", "25", "50" };
 
-        [SerializeField] private bool _overlayEnabled;
-
         private FramedashHeatmapSettings _settings;
         private FramedashEditorHttpClient _httpClient;
-        private FramedashHeatmapOverlay _overlay;
         private List<FramedashEditorLogic.MapInfo> _maps =
             new List<FramedashEditorLogic.MapInfo>();
+        private string[] _mapNames = FramedashEditorLogic.BuildMapNames(null);
         private int _selectedMapIndex = -1;
         private int _queryRevision;
         private bool _busy;
@@ -30,7 +28,7 @@ namespace Framedash.Editor
         private Vector2 _scrollPosition;
 
         [MenuItem("Window/Framedash Heatmap")]
-        private static void OpenWindow()
+        internal static void ShowWindow()
         {
             GetWindow<FramedashHeatmapWindow>("Framedash Heatmap");
         }
@@ -44,8 +42,16 @@ namespace Framedash.Editor
                     Environment.GetEnvironmentVariable("FRAMEDASH_ANALYTICS_API_KEY"));
                 _settings = FramedashHeatmapSettings.instance;
                 _httpClient = new FramedashEditorHttpClient();
-                _overlay = new FramedashHeatmapOverlay();
-                _overlay.SetEnabled(_overlayEnabled);
+                FramedashHeatmapOverlayService.StateChanged += OnOverlayStateChanged;
+                FramedashHeatmapOverlayService.CancelBackgroundRestore();
+                if (ShouldRestoreMapSelection())
+                {
+                    bool hasLoadedOverlay = FramedashHeatmapOverlayService.HasData;
+                    RefreshMaps(
+                        restoreHeatmap: !hasLoadedOverlay && _settings.OverlayEnabled,
+                        preserveOverlay: hasLoadedOverlay,
+                        allowFirstMapFallback: false);
+                }
             }
             catch (Exception exception)
             {
@@ -61,8 +67,7 @@ namespace Framedash.Editor
                 _isLive = false;
                 _queryRevision++;
                 _busy = false;
-                _overlay?.Shutdown();
-                _overlay = null;
+                FramedashHeatmapOverlayService.StateChanged -= OnOverlayStateChanged;
                 _httpClient?.Shutdown();
                 _httpClient = null;
             }
@@ -93,144 +98,175 @@ namespace Framedash.Editor
             }
 
             _scrollPosition = EditorGUILayout.BeginScrollView(_scrollPosition);
-            EditorGUILayout.LabelField("Cloud Heatmap", EditorStyles.boldLabel);
-            EditorGUILayout.Space();
-
-            EditorGUI.BeginChangeCheck();
-            string readApiKey = EditorGUILayout.PasswordField("Read API Key", _settings.ReadApiKey ?? "");
-            if (EditorGUI.EndChangeCheck())
+            float previousLabelWidth = EditorGUIUtility.labelWidth;
+            EditorGUIUtility.labelWidth = Mathf.Clamp(position.width * 0.34f, 86f, 132f);
+            try
             {
-                _settings.ReadApiKey = readApiKey;
-                _settings.Persist();
-                HandleConnectionSettingsChanged();
+                EditorGUILayout.LabelField("Cloud Heatmap", EditorStyles.boldLabel);
+                EditorGUILayout.Space();
+
+                EditorGUI.BeginChangeCheck();
+                string readApiKey = EditorGUILayout.PasswordField(
+                    "Read API Key",
+                    _settings.ReadApiKey ?? "");
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _settings.ReadApiKey = readApiKey;
+                    _settings.Persist();
+                    HandleConnectionSettingsChanged();
+                }
+                if (string.IsNullOrWhiteSpace(_settings.ReadApiKey)
+                    && _hasEnvironmentReadApiKey)
+                {
+                    EditorGUILayout.HelpBox(
+                        "Using FRAMEDASH_ANALYTICS_API_KEY from the Unity process. The value is not saved.",
+                        MessageType.Info);
+                }
+
+                EditorGUI.BeginChangeCheck();
+                string apiBaseUrl = EditorGUILayout.TextField(
+                    "API Base URL",
+                    _settings.ApiBaseUrl ?? "");
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _settings.ApiBaseUrl = apiBaseUrl;
+                    _settings.Persist();
+                    HandleConnectionSettingsChanged();
+                }
+
+                EditorGUI.BeginChangeCheck();
+                string projectId = EditorGUILayout.TextField(
+                    "Project ID",
+                    _settings.ProjectId ?? "");
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _settings.ProjectId = projectId;
+                    _settings.Persist();
+                    HandleConnectionSettingsChanged();
+                }
+
+                int daysIndex = Array.IndexOf(AllowedDays, _settings.Days);
+                EditorGUI.BeginChangeCheck();
+                int newDaysIndex = EditorGUILayout.Popup(
+                    "Days",
+                    daysIndex,
+                    AllowedDaysLabels);
+                if (EditorGUI.EndChangeCheck() && newDaysIndex >= 0)
+                {
+                    _settings.Days = AllowedDays[newDaysIndex];
+                    _settings.Persist();
+                    HandleQuerySettingsChanged(
+                        "Days changed. Fetch heatmap data for the new selection.");
+                }
+
+                int cellSizeIndex = Array.IndexOf(AllowedCellSizes, _settings.CellSize);
+                EditorGUI.BeginChangeCheck();
+                int newCellSizeIndex = EditorGUILayout.Popup(
+                    "Cell Size",
+                    cellSizeIndex,
+                    AllowedCellSizesLabels);
+                if (EditorGUI.EndChangeCheck() && newCellSizeIndex >= 0)
+                {
+                    _settings.CellSize = AllowedCellSizes[newCellSizeIndex];
+                    _settings.Persist();
+                    HandleQuerySettingsChanged(
+                        "Cell size changed. Fetch heatmap data for the new selection.");
+                }
+
+                EditorGUI.BeginChangeCheck();
+                string eventName = EditorGUILayout.TextField(
+                    "Event Name Filter",
+                    _settings.EventNameFilter ?? "");
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _settings.EventNameFilter = eventName;
+                    _settings.Persist();
+                    HandleQuerySettingsChanged(
+                        "Event name changed. Fetch heatmap data for the new selection.");
+                }
+
+                EditorGUILayout.Space();
+                DrawMapSelector();
+
+                EditorGUILayout.BeginHorizontal();
+                EditorGUI.BeginDisabledGroup(_busy || !HasSelectedMap());
+                if (GUILayout.Button(_busy ? "Working..." : "Fetch"))
+                {
+                    FetchHeatmap();
+                }
+                EditorGUI.EndDisabledGroup();
+
+                EditorGUI.BeginDisabledGroup(!FramedashHeatmapOverlayService.HasData);
+                if (GUILayout.Button("Frame Heatmap"))
+                {
+                    if (!FramedashHeatmapOverlayService.FrameHeatmap())
+                    {
+                        _status = "Open a Scene view before framing the heatmap.";
+                    }
+                }
+                EditorGUI.EndDisabledGroup();
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUI.BeginChangeCheck();
+                bool overlayEnabled = EditorGUILayout.ToggleLeft(
+                    "Overlay Enabled",
+                    FramedashHeatmapOverlayService.IsEnabled);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    FramedashHeatmapOverlayService.SetEnabled(overlayEnabled);
+                }
+
+                EditorGUI.BeginChangeCheck();
+                float opacity = EditorGUILayout.Slider(
+                    "Opacity",
+                    _settings.OverlayOpacity,
+                    0,
+                    1);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _settings.OverlayOpacity = opacity;
+                    _settings.Persist();
+                    FramedashHeatmapOverlayService.RefreshColors();
+                }
+
+                EditorGUI.BeginChangeCheck();
+                float zOffset = EditorGUILayout.FloatField("Z Offset", _settings.ZOffset);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    _settings.ZOffset = zOffset;
+                    _settings.Persist();
+                    SceneView.RepaintAll();
+                }
+
+                DrawLegend();
+                EditorGUILayout.LabelField(
+                    FramedashHeatmapOverlayService.StatsText,
+                    EditorStyles.miniLabel);
+
+                EditorGUILayout.Space();
+                EditorGUILayout.HelpBox(_status ?? "", MessageType.Info);
             }
-            if (string.IsNullOrWhiteSpace(_settings.ReadApiKey)
-                && _hasEnvironmentReadApiKey)
+            finally
             {
-                EditorGUILayout.HelpBox(
-                    "Using FRAMEDASH_ANALYTICS_API_KEY from the Unity process. The value is not saved.",
-                    MessageType.Info);
+                EditorGUIUtility.labelWidth = previousLabelWidth;
+                EditorGUILayout.EndScrollView();
             }
-
-            EditorGUI.BeginChangeCheck();
-            string apiBaseUrl = EditorGUILayout.TextField("API Base URL", _settings.ApiBaseUrl ?? "");
-            if (EditorGUI.EndChangeCheck())
-            {
-                _settings.ApiBaseUrl = apiBaseUrl;
-                _settings.Persist();
-                HandleConnectionSettingsChanged();
-            }
-
-            EditorGUI.BeginChangeCheck();
-            string projectId = EditorGUILayout.TextField("Project ID", _settings.ProjectId ?? "");
-            if (EditorGUI.EndChangeCheck())
-            {
-                _settings.ProjectId = projectId;
-                _settings.Persist();
-                HandleConnectionSettingsChanged();
-            }
-
-            int daysIndex = Array.IndexOf(AllowedDays, _settings.Days);
-            EditorGUI.BeginChangeCheck();
-            int newDaysIndex = EditorGUILayout.Popup(
-                "Days",
-                daysIndex,
-                AllowedDaysLabels);
-            if (EditorGUI.EndChangeCheck() && newDaysIndex >= 0)
-            {
-                _settings.Days = AllowedDays[newDaysIndex];
-                _settings.Persist();
-                HandleQuerySettingsChanged("Days changed. Fetch heatmap data for the new selection.");
-            }
-
-            int cellSizeIndex = Array.IndexOf(AllowedCellSizes, _settings.CellSize);
-            EditorGUI.BeginChangeCheck();
-            int newCellSizeIndex = EditorGUILayout.Popup(
-                "Cell Size",
-                cellSizeIndex,
-                AllowedCellSizesLabels);
-            if (EditorGUI.EndChangeCheck() && newCellSizeIndex >= 0)
-            {
-                _settings.CellSize = AllowedCellSizes[newCellSizeIndex];
-                _settings.Persist();
-                HandleQuerySettingsChanged("Cell size changed. Fetch heatmap data for the new selection.");
-            }
-
-            EditorGUI.BeginChangeCheck();
-            string eventName = EditorGUILayout.TextField(
-                "Event Name Filter",
-                _settings.EventNameFilter ?? "");
-            if (EditorGUI.EndChangeCheck())
-            {
-                _settings.EventNameFilter = eventName;
-                _settings.Persist();
-                HandleQuerySettingsChanged(
-                    "Event name changed. Fetch heatmap data for the new selection.");
-            }
-
-            EditorGUILayout.Space();
-            DrawMapSelector();
-
-            EditorGUILayout.BeginHorizontal();
-            EditorGUI.BeginDisabledGroup(_busy || !HasSelectedMap());
-            if (GUILayout.Button(_busy ? "Working..." : "Fetch"))
-            {
-                FetchHeatmap();
-            }
-            EditorGUI.EndDisabledGroup();
-
-            EditorGUI.BeginChangeCheck();
-            bool overlayEnabled = EditorGUILayout.ToggleLeft(
-                "Overlay Enabled",
-                _overlayEnabled,
-                GUILayout.Width(140));
-            if (EditorGUI.EndChangeCheck())
-            {
-                _overlayEnabled = overlayEnabled;
-                _overlay?.SetEnabled(_overlayEnabled);
-            }
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUI.BeginChangeCheck();
-            float opacity = EditorGUILayout.Slider("Opacity", _settings.OverlayOpacity, 0, 1);
-            if (EditorGUI.EndChangeCheck())
-            {
-                _settings.OverlayOpacity = opacity;
-                _settings.Persist();
-                _overlay?.RefreshColors();
-            }
-
-            EditorGUI.BeginChangeCheck();
-            float zOffset = EditorGUILayout.FloatField("Z Offset", _settings.ZOffset);
-            if (EditorGUI.EndChangeCheck())
-            {
-                _settings.ZOffset = zOffset;
-                _settings.Persist();
-                SceneView.RepaintAll();
-            }
-
-            EditorGUILayout.Space();
-            EditorGUILayout.HelpBox(_status ?? "", MessageType.Info);
-            EditorGUILayout.EndScrollView();
         }
 
         private void DrawMapSelector()
         {
-            EditorGUILayout.BeginHorizontal();
-            string[] mapNames = new string[_maps.Count + 1];
-            mapNames[0] = "Select a map";
-            for (int i = 0; i < _maps.Count; i++)
-            {
-                mapNames[i + 1] = _maps[i].Name;
-            }
-
+            EditorGUILayout.LabelField("Map");
             EditorGUI.BeginDisabledGroup(_busy);
             EditorGUI.BeginChangeCheck();
-            int popupIndex = EditorGUILayout.Popup("Map", _selectedMapIndex + 1, mapNames);
+            int popupIndex = EditorGUILayout.Popup(_selectedMapIndex + 1, _mapNames);
             if (EditorGUI.EndChangeCheck())
             {
                 _selectedMapIndex = popupIndex - 1;
-                _overlay?.ClearData();
+                _settings.SelectedMapId = HasSelectedMap()
+                    ? _maps[_selectedMapIndex].MapId
+                    : "";
+                _settings.Persist();
+                FramedashHeatmapOverlayService.ClearData();
                 _status = _selectedMapIndex >= 0
                     ? "Map changed. Fetch heatmap data for the new selection."
                     : "Select a map.";
@@ -238,31 +274,36 @@ namespace Framedash.Editor
             EditorGUI.EndDisabledGroup();
 
             EditorGUI.BeginDisabledGroup(_busy);
-            if (GUILayout.Button("Refresh Maps", GUILayout.Width(110)))
+            if (GUILayout.Button("Refresh Maps"))
             {
                 RefreshMaps();
             }
             EditorGUI.EndDisabledGroup();
-            EditorGUILayout.EndHorizontal();
         }
 
         private void HandleConnectionSettingsChanged()
         {
             _queryRevision++;
             _maps.Clear();
+            _mapNames = FramedashEditorLogic.BuildMapNames(null);
             _selectedMapIndex = -1;
-            _overlay?.ClearData();
+            _settings.SelectedMapId = "";
+            _settings.Persist();
+            FramedashHeatmapOverlayService.ClearData();
             _status = "Connection settings changed. Refresh maps for the new project.";
         }
 
         private void HandleQuerySettingsChanged(string status)
         {
             _queryRevision++;
-            _overlay?.ClearData();
+            FramedashHeatmapOverlayService.ClearData();
             _status = status;
         }
 
-        private void RefreshMaps()
+        private void RefreshMaps(
+            bool restoreHeatmap = false,
+            bool preserveOverlay = false,
+            bool allowFirstMapFallback = true)
         {
             if (_busy || _httpClient == null)
             {
@@ -270,8 +311,13 @@ namespace Framedash.Editor
             }
             _busy = true;
             _maps.Clear();
+            _mapNames = FramedashEditorLogic.BuildMapNames(null);
             _selectedMapIndex = -1;
-            _overlay?.ClearData();
+            string preferredMapId = _settings.SelectedMapId;
+            if (!preserveOverlay)
+            {
+                FramedashHeatmapOverlayService.ClearData();
+            }
             _status = "Loading maps...";
             int requestRevision = _queryRevision;
             _httpClient.FetchMaps(_settings, (success, maps, error) =>
@@ -301,10 +347,31 @@ namespace Framedash.Editor
                     }
 
                     _maps = maps ?? new List<FramedashEditorLogic.MapInfo>();
-                    _selectedMapIndex = _maps.Count == 0 ? -1 : 0;
+                    _mapNames = FramedashEditorLogic.BuildMapNames(_maps);
+                    _selectedMapIndex = FramedashEditorLogic.ResolveMapSelectionIndex(
+                        _maps,
+                        _settings.SelectedMapId,
+                        allowFirstMapFallback);
+                    _settings.SelectedMapId = HasSelectedMap()
+                        ? _maps[_selectedMapIndex].MapId
+                        : "";
+                    _settings.Persist();
+                    if (preserveOverlay
+                        && !string.Equals(
+                            preferredMapId,
+                            _settings.SelectedMapId,
+                            StringComparison.Ordinal))
+                    {
+                        FramedashHeatmapOverlayService.ClearData();
+                    }
                     _status = _maps.Count == 0
                         ? "No maps were returned for this project."
                         : "Loaded " + _maps.Count + " map(s). Select a map and fetch its heatmap.";
+                    if (restoreHeatmap && HasSelectedMap())
+                    {
+                        FetchHeatmap();
+                        return;
+                    }
                     Repaint();
                 }
                 catch (Exception exception)
@@ -326,7 +393,7 @@ namespace Framedash.Editor
 
             _busy = true;
             _status = "Fetching cloud heatmap cells...";
-            _overlay?.ClearData();
+            FramedashHeatmapOverlayService.ClearData();
             FramedashEditorLogic.MapInfo selectedMap = _maps[_selectedMapIndex];
             int cellSize = _settings.CellSize;
             int requestRevision = _queryRevision;
@@ -360,7 +427,7 @@ namespace Framedash.Editor
 
                     List<FramedashEditorLogic.HeatmapCell> loadedCells =
                         cells ?? new List<FramedashEditorLogic.HeatmapCell>();
-                    _overlay?.SetData(selectedMap, loadedCells, cellSize);
+                    FramedashHeatmapOverlayService.SetData(selectedMap, loadedCells, cellSize);
                     _status = loadedCells.Count == 10000
                         ? "Loaded 10000 cells. Results may be truncated at the API limit of 10,000 cells."
                         : "Loaded " + loadedCells.Count + " heatmap cell(s).";
@@ -379,6 +446,54 @@ namespace Framedash.Editor
         private bool HasSelectedMap()
         {
             return _selectedMapIndex >= 0 && _selectedMapIndex < _maps.Count;
+        }
+
+        private bool ShouldRestoreMapSelection()
+        {
+            if (string.IsNullOrWhiteSpace(_settings.SelectedMapId)
+                || string.IsNullOrWhiteSpace(_settings.ProjectId))
+            {
+                return false;
+            }
+            string readApiKey = FramedashEditorLogic.ResolveReadApiKey(
+                _settings.ReadApiKey,
+                Environment.GetEnvironmentVariable("FRAMEDASH_ANALYTICS_API_KEY"));
+            return !string.IsNullOrEmpty(readApiKey);
+        }
+
+        private void OnOverlayStateChanged()
+        {
+            if (this != null)
+            {
+                Repaint();
+            }
+        }
+
+        private static void DrawLegend()
+        {
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField("Intensity", EditorStyles.miniBoldLabel);
+            Rect rect = EditorGUILayout.GetControlRect(false, 14);
+            float labelWidth = 28;
+            Rect gradientRect = new Rect(
+                rect.x + labelWidth,
+                rect.y + 2,
+                Mathf.Max(1, rect.width - labelWidth * 2),
+                rect.height - 4);
+            for (int i = 0; i < 5; i++)
+            {
+                FramedashEditorLogic.HeatmapRgba rgba =
+                    FramedashEditorLogic.HeatmapColor(i / 4.0, 1);
+                float segmentWidth = gradientRect.width / 5;
+                EditorGUI.DrawRect(
+                    new Rect(gradientRect.x + segmentWidth * i, gradientRect.y, segmentWidth, gradientRect.height),
+                    new Color(rgba.R, rgba.G, rgba.B, 1));
+            }
+            GUI.Label(new Rect(rect.x, rect.y, labelWidth, rect.height), "Low", EditorStyles.miniLabel);
+            GUI.Label(
+                new Rect(rect.xMax - labelWidth, rect.y, labelWidth, rect.height),
+                "High",
+                EditorStyles.miniLabel);
         }
     }
 }

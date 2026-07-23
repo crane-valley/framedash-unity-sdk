@@ -89,15 +89,12 @@ namespace Framedash.Editor
                 return;
             }
 
-            string url = baseUrl
-                + "/api/v1/projects/" + Uri.EscapeDataString(projectId)
-                + "/heatmap?mapId=" + Uri.EscapeDataString(mapSlug)
-                + "&cellSize=" + settings.CellSize
-                + "&days=" + settings.Days;
-            if (!string.IsNullOrEmpty(settings.EventNameFilter))
-            {
-                url += "&eventName=" + Uri.EscapeDataString(settings.EventNameFilter);
-            }
+            string url = baseUrl + FramedashEditorLogic.BuildHeatmapQueryPath(
+                projectId,
+                mapSlug,
+                settings.CellSize,
+                settings.Days,
+                settings.EventNameFilter);
 
             StartGet(url, apiKey, (connected, statusCode, body, requestError) =>
             {

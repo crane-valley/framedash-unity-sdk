@@ -13,10 +13,15 @@ namespace Framedash.Editor
             new List<FramedashEditorLogic.HeatmapRenderCell>();
         private Mesh _mesh;
         private Material _material;
-        private double _baseZ;
         private bool _enabled;
         private bool _subscribed;
         private bool _shuttingDown;
+
+        public int CellCount => _renderCells.Count;
+
+        public double MaxWeight { get; private set; }
+
+        public bool HasData => _renderCells.Count > 0;
 
         public void SetData(
             FramedashEditorLogic.MapInfo map,
@@ -25,18 +30,21 @@ namespace Framedash.Editor
         {
             ReleaseMesh();
             _renderCells.Clear();
+            MaxWeight = 0;
             if (map == null || cells == null)
             {
                 SceneView.RepaintAll();
                 return;
             }
-            _baseZ = map.WorldMinZ ?? 0;
             double maxWeight = FramedashEditorLogic.FindMaxWeight(cells);
+            MaxWeight = maxWeight;
             for (int i = 0; i < cells.Count; i++)
             {
                 FramedashEditorLogic.HeatmapCell cell = cells[i];
-                _renderCells.Add(new FramedashEditorLogic.HeatmapRenderCell(
-                    FramedashEditorLogic.BuildCellRect(cell, map, cellSize),
+                _renderCells.Add(FramedashEditorLogic.BuildHeatmapRenderCell(
+                    cell,
+                    map,
+                    cellSize,
                     FramedashEditorLogic.NormalizeWeight(cell.Weight, maxWeight)));
             }
             if (_renderCells.Count > 0)
@@ -49,8 +57,26 @@ namespace Framedash.Editor
         public void ClearData()
         {
             _renderCells.Clear();
+            MaxWeight = 0;
             ReleaseMesh();
             SceneView.RepaintAll();
+        }
+
+        public bool TryGetWorldBounds(out Bounds bounds)
+        {
+            bounds = default;
+            if (!FramedashEditorLogic.TryBuildHeatmapBounds(
+                    _renderCells,
+                    FramedashHeatmapSettings.instance.ZOffset,
+                    out FramedashEditorLogic.HeatmapBoundsData data))
+            {
+                return false;
+            }
+
+            var minimum = new Vector3((float)data.MinX, (float)data.MinY, (float)data.MinZ);
+            var maximum = new Vector3((float)data.MaxX, (float)data.MaxY, (float)data.MaxZ);
+            bounds.SetMinMax(minimum, maximum);
+            return true;
         }
 
         public void RefreshColors()
@@ -97,6 +123,7 @@ namespace Framedash.Editor
             SceneView.duringSceneGui -= OnSceneGui;
             _subscribed = false;
             _renderCells.Clear();
+            MaxWeight = 0;
             ReleaseMesh();
             ReleaseMaterial();
             SceneView.RepaintAll();
@@ -111,7 +138,10 @@ namespace Framedash.Editor
             {
                 // TelemetrySDK.Track assigns position.x/y/z directly to PositionX/Y/Z,
                 // so an XZ ground-plane remap would render different coordinates than recorded.
-                vertices[i] = new Vector3((float)geometry.X[i], (float)geometry.Y[i], (float)_baseZ);
+                vertices[i] = new Vector3(
+                    (float)geometry.X[i],
+                    (float)geometry.Y[i],
+                    (float)geometry.Z[i]);
             }
 
             _mesh = new Mesh
