@@ -43,7 +43,7 @@ namespace Framedash.Editor.Logic
             }
         }
 
-        private bool TryReadValue(out object? value)
+        private bool TryReadValue(out object? value, int depth = 0)
         {
             value = null;
             if (_index >= _json.Length)
@@ -53,9 +53,9 @@ namespace Framedash.Editor.Logic
             switch (_json[_index])
             {
                 case '{':
-                    return TryReadObject(out value);
+                    return depth < 64 && TryReadObject(out value, depth + 1);
                 case '[':
-                    return TryReadArray(out value);
+                    return depth < 64 && TryReadArray(out value, depth + 1);
                 case '"':
                     if (TryReadString(out string? text))
                     {
@@ -74,7 +74,7 @@ namespace Framedash.Editor.Logic
             }
         }
 
-        private bool TryReadObject([NotNullWhen(true)] out object? value)
+        private bool TryReadObject([NotNullWhen(true)] out object? value, int depth)
         {
             value = null;
             _index++;
@@ -97,7 +97,7 @@ namespace Framedash.Editor.Logic
                     return false;
                 }
                 SkipWhitespace();
-                if (!TryReadValue(out object? item))
+                if (!TryReadValue(out object? item, depth))
                 {
                     return false;
                 }
@@ -116,7 +116,7 @@ namespace Framedash.Editor.Logic
             }
         }
 
-        private bool TryReadArray([NotNullWhen(true)] out object? value)
+        private bool TryReadArray([NotNullWhen(true)] out object? value, int depth)
         {
             value = null;
             _index++;
@@ -129,7 +129,7 @@ namespace Framedash.Editor.Logic
             }
             while (true)
             {
-                if (!TryReadValue(out object? item))
+                if (!TryReadValue(out object? item, depth))
                 {
                     return false;
                 }

@@ -6,7 +6,9 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
-## [0.1.8] - 2026-09-12
+## [0.1.8] - Publication pending
+
+Prepared in source; the public v0.1.8 tag is not yet verified.
 
 ### Added
 
@@ -27,6 +29,12 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
   signature and now forwards to the new method.
 
 ### Changed
+
+- Background event tracking reads frame-time and memory values cached on the main
+  thread, avoiding Unity API exceptions. Performance-run begin/end report marker
+  admission failures, and buffer overflow during capture prevents a successful end.
+- Editor JSON parsing rejects more than 64 nested containers before recursion can
+  exhaust the stack; wide map and heatmap responses remain supported.
 
 - Added nullable reference annotations to the public API. Projects compiling with
   nullable enabled may see new (accurate) warnings; with `TreatWarningsAsErrors`

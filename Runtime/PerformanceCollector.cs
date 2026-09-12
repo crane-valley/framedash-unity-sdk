@@ -1,3 +1,4 @@
+using System.Threading;
 using UnityEngine;
 using UnityEngine.Profiling;
 
@@ -27,6 +28,8 @@ namespace Framedash
 		private float _cachedGpuTimeMs;
 		private float _cachedGameThreadMs;
 		private float _cachedRenderThreadMs;
+		private volatile float _cachedDeltaTime;
+		private long _cachedMemoryUsedBytes;
 
 		/// <summary>
 		/// Capture FrameTimingManager data and cache GPU / CPU thread times.
@@ -37,6 +40,8 @@ namespace Framedash
 		/// </summary>
 		public void UpdateFrameTimings()
 		{
+			_cachedDeltaTime = Time.unscaledDeltaTime;
+			Interlocked.Exchange(ref _cachedMemoryUsedBytes, FieldClamp.ClampMemory(Profiler.GetTotalAllocatedMemoryLong()));
 			FrameTimingManager.CaptureFrameTimings();
 			uint count = FrameTimingManager.GetLatestTimings(1, _timings);
 			if (count == 0)
@@ -54,7 +59,8 @@ namespace Framedash
 
 		public PerfSnapshot Collect()
 		{
-			float deltaTime = Time.unscaledDeltaTime;
+			// Track can run off-thread, where Unity rejects Time and Profiler access.
+			float deltaTime = _cachedDeltaTime;
 			float rawFrameTimeMs = deltaTime * 1000f;
 			// Clamp the real-time frame delta to the ingest frame-time ceiling (10000ms):
 			// a long pause/resume gap would otherwise emit a frame_time the validator
@@ -69,7 +75,7 @@ namespace Framedash
 				// is valid to ingest.
 				Fps = FieldClamp.FpsFromFrameTimeMs(rawFrameTimeMs),
 				FrameTimeMs = frameTimeMs,
-				MemoryUsedBytes = FieldClamp.ClampMemory(Profiler.GetTotalAllocatedMemoryLong()),
+				MemoryUsedBytes = Interlocked.Read(ref _cachedMemoryUsedBytes),
 				// FrameTimingManager values can be NaN/huge; clamp each to [0, 10000].
 				GpuTimeMs = FieldClamp.ClampTimingMs(_cachedGpuTimeMs),
 				GameThreadMs = FieldClamp.ClampTimingMs(_cachedGameThreadMs),

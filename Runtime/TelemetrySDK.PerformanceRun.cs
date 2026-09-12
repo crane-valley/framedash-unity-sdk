@@ -8,6 +8,7 @@ namespace Framedash
 	{
 		private PerformanceRunCapture _performanceRun;
 		private long _performanceRunTick;
+		private int _performanceRunDropBaseline;
 
 		public bool BeginPerformanceRun(PerformanceRunOptions options)
 		{
@@ -16,10 +17,12 @@ namespace Framedash
 				if (!_initialized || Thread.CurrentThread.ManagedThreadId != _mainThreadId || _performanceRun != null
 					|| !PerformanceRunCapture.ValidLabel(_session.ResolveSessionStamp(_buildId, null).BuildId)
 					|| !PerformanceRunCapture.TryCreate(options, out var capture, SdkVersion)) return false;
-				TrackInternal("perf_run_start", "", 0, 0, 0, TelemetrySource.Automated,
-					capture.StartAttributes(), null, attachPerformance: false);
+				int dropBaseline = _buffer.DroppedCount;
+				if (!TrackInternal("perf_run_start", "", 0, 0, 0, TelemetrySource.Automated,
+					capture.StartAttributes(), null, attachPerformance: false, preserveBufferedEvents: true)) return false;
 				_performanceRun = capture;
 				_performanceRunTick = 0;
+				_performanceRunDropBaseline = dropBaseline;
 				return true;
 			}
 			catch (Exception) { return false; }
@@ -32,9 +35,13 @@ namespace Framedash
 				if (!_initialized || Thread.CurrentThread.ManagedThreadId != _mainThreadId || _performanceRun == null) return false;
 				var capture = _performanceRun;
 				_performanceRun = null;
-				TrackInternal("perf_run_end", "", 0, 0, 0, TelemetrySource.Automated,
-					capture.EndAttributes(completed), capture.Metrics(), attachPerformance: false);
-				return completed && capture.IsComplete;
+				// Overflow can evict the start marker before the end is admitted.
+				bool retained = _buffer.DroppedCount == _performanceRunDropBaseline;
+				bool admitted = TrackInternal("perf_run_end", "", 0, 0, 0, TelemetrySource.Automated,
+					capture.EndAttributes(completed && retained), capture.Metrics(),
+					attachPerformance: false, preserveBufferedEvents: true);
+				return admitted && completed && capture.IsComplete
+					&& _buffer.DroppedCount == _performanceRunDropBaseline;
 			}
 			catch (Exception) { return false; }
 		}

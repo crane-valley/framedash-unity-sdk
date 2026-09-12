@@ -64,7 +64,7 @@ namespace Framedash
                     if (_rejectedNewestCount % DropLogInterval == 1)
                     {
                         Debug.LogWarning(
-                            $"[Framedash] Event buffer full with a durable prefix — {_rejectedNewestCount} incoming event(s) rejected so far.");
+                            $"[Framedash] Event buffer full - {_rejectedNewestCount} incoming event(s) rejected to preserve buffered events.");
                     }
                     return false;
                 }

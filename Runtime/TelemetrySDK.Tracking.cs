@@ -112,14 +112,15 @@ namespace Framedash
             }
         }
 
-        private void TrackInternal(
+        private bool TrackInternal(
             string eventName,
             string mapId,
             float posX, float posY, float posZ,
             TelemetrySource source,
             List<StringPair> attributes,
             List<FloatPair> metrics,
-            bool attachPerformance = true)
+            bool attachPerformance = true,
+            bool preserveBufferedEvents = false)
         {
             // Run summaries must not enter legacy snapshot-based build aggregates.
             var perf = attachPerformance ? _perfCollector.Collect() : default;
@@ -175,16 +176,17 @@ namespace Framedash
 
             bool preservePersistedPrefix = _offlineQueueActive
                 && Volatile.Read(ref _pendingPersistedEventsToAck) > 0;
-            if (preservePersistedPrefix && !_buffer.TryEnqueuePreservingOldest(evt))
+            bool preserveOldest = preservePersistedPrefix || preserveBufferedEvents;
+            if (preserveOldest && !_buffer.TryEnqueuePreservingOldest(evt))
             {
                 // The on-disk queue is positional, so overwriting its in-memory head would
                 // make a later DropOldest acknowledge a different event. Let the main-thread
                 // flush make room instead of doing disk I/O on the caller's Track path.
                 _flushRequested = true;
-                return;
+                return false;
             }
 
-            if (!preservePersistedPrefix)
+            if (!preserveOldest)
             {
                 _buffer.Enqueue(evt);
             }
@@ -199,6 +201,7 @@ namespace Framedash
             {
                 _flushRequested = true;
             }
+            return true;
         }
 
         public void SetPlayerId(string playerId)

@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -50,14 +52,14 @@ namespace Framedash
 			};
 		}
 
-		internal static bool ValidLabel(string value)
+		internal static bool ValidLabel(string? value)
 		{
 			if (string.IsNullOrWhiteSpace(value) || value.Length > 128) return false;
 			foreach (char c in value) if (c < 32 || c == 127) return false;
 			return true;
 		}
 
-		public static bool TryCreate(PerformanceRunOptions options, out PerformanceRunCapture capture, string sdkVersion = "development")
+		public static bool TryCreate(PerformanceRunOptions? options, out PerformanceRunCapture capture, string sdkVersion = "development")
 		{
 			capture = null!;
 			if (options == null || options.RunId == null || options.RunId.Length != 36 || !Guid.TryParseExact(options.RunId, "D", out _)

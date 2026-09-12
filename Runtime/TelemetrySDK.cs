@@ -445,6 +445,7 @@ namespace Framedash
             _transport = new TransportLayer(_endpointUrl, effectiveApiKey, SdkVersion, _maxPayloadBytes, _verboseLogging);
             _session = new SessionManager(_playerId);
             _perfCollector = new PerformanceCollector();
+            _perfCollector.UpdateFrameTimings();
             // Reset the camera snapshot so a re-init (Shutdown then Initialize) does
             // not stamp session_start / pre-first-Update events with a stale reading.
             Interlocked.Exchange(ref _cameraSnapshot, CameraMath.CameraAbsent);

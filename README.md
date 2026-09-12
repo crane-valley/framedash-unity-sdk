@@ -356,6 +356,8 @@ Two things to know when wiring this into a real pipeline:
 ## Per-frame run capture (pilot)
 
 This opt-in API is added in SDK 0.1.8; version 0.1.7 and earlier do not include it.
+Until the public v0.1.8 tag is verified, this pilot requires a package built from
+this source tree. The v0.1.7 installation example above does not include this API.
 COPPA-enabled organizations cannot use this pilot: server-side redaction removes
 its run attributes, and the comparison endpoint returns 403. Local capture/flush
 success does not establish eligibility. After initialization and build identity setup, call
@@ -378,6 +380,10 @@ after scenario completion. An intentional abort uses `completed: false`.
 Ending before the frame budget completes, dropped samples, and shutdown without
 an explicit successful end remain incomplete. Check completion and the existing
 bounded `FlushBlocking` result separately; local capture does not prove delivery.
+Begin/end return false if their marker cannot enter the event buffer. An overflow
+during capture conservatively prevents a successful end because it can evict the
+start marker, even if unrelated telemetry was dropped. Later delivery or buffer
+loss still requires checking the server comparison.
 CLI 0.1.11 adds `run-diff` to compare run IDs and optional unchanged repeats.
 It reports intervals and condition/completeness failures without changing the
 existing `perf-diff` gate. `run-profile-test` alone does not enable this capture.
