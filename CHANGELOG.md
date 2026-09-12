@@ -30,6 +30,9 @@ Prepared in source; the public v0.1.8 tag is not yet verified.
 
 ### Changed
 
+- Aborting an asynchronous flush also cancels a pending direct-socket fallback,
+  including when Unity does not dispose its nested iterator. Repeated blocking
+  flush timeouts reuse one pending DNS lookup instead of accumulating lookups.
 - Background event tracking reads frame-time and memory values cached on the main
   thread, avoiding Unity API exceptions. Performance-run begin/end report marker
   admission failures, and buffer overflow during capture prevents a successful end.

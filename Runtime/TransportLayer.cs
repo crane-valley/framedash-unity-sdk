@@ -86,6 +86,9 @@ namespace Framedash
         /// </summary>
         private Task<ValueTuple<string, string>> _resolveTask;
 
+        // Stopped nested iterators may never run their finally, so abort must retain the token.
+        private CancellationTokenSource _activeFallback;
+
         // Out-param holder for the fallback coroutine (coroutines cannot return).
         private sealed class FallbackResult
         {
@@ -117,6 +120,9 @@ namespace Framedash
 
         public void AbortInFlightRequest()
         {
+#if !UNITY_WEBGL
+            CancelFallback(_activeFallback);
+#endif
             var request = _activeRequest;
             _activeRequest = null;
             if (request == null) return;
@@ -477,25 +483,22 @@ namespace Framedash
             result.StatusCode = 0;
 
             Task<long> sendTask;
-            CancellationTokenSource abandonSource;
+            CancellationTokenSource abandonSource = null;
             try
             {
                 string attemptUrl = _plan.AttemptUrls[familyIndex];
                 var uri = new Uri(attemptUrl);
                 byte[] head = RawHttpMessage.BuildPostHead(
                     uri.PathAndQuery, _plan.HostHeader, _apiKey, _sdkVersion, payload.Length);
-                // The abandon token guarantees a Task.Run still queued behind a busy
-                // thread pool (or not yet past the request write) can NEVER fire the
-                // POST after this coroutine stops waiting -- a late duplicate send
-                // would re-deliver events the caller already classified as failed
-                // and persisted (DeliveredLeadingCount divergence).
                 abandonSource = new CancellationTokenSource();
+                _activeFallback = abandonSource;
                 sendTask = DirectSocketSender.PostAsync(
                     attemptUrl, _plan.CommonName, head, payload, RequestTimeoutSeconds,
                     abandonSource.Token);
             }
             catch (Exception e)
             {
+                CancelFallback(abandonSource);
                 Debug.LogWarning($"[Framedash] Direct-socket fallback dispatch failed: {e.Message}");
                 yield break;
             }
@@ -519,15 +522,17 @@ namespace Framedash
             }
             finally
             {
-                // Signal abandon whether we timed out, completed, or the coroutine
-                // was torn down mid-poll (iterator Dispose runs this finally): after
-                // completion the cancel is a no-op; otherwise it stops an unfired or
-                // pre-write send. The CTS is deliberately NOT disposed here -- the
-                // still-running task may be about to link against the token, and a
-                // timer-less CTS is reclaimed by GC without Dispose.
-                try { abandonSource.Cancel(); }
-                catch {   }
+                CancelFallback(abandonSource);
             }
+        }
+
+        private void CancelFallback(CancellationTokenSource source)
+        {
+            if (source == null) return;
+            if (ReferenceEquals(_activeFallback, source)) _activeFallback = null;
+            // Queued sends may still link this timer-less source; GC reclaims it without disposal.
+            try { source.Cancel(); }
+            catch {   }
         }
 #endif
 

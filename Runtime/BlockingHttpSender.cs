@@ -48,6 +48,7 @@ namespace Framedash
     internal sealed class BlockingHttpSender
     {
         private const int StatusReadBufferBytes = 1024;
+        private static readonly PendingDnsResolver Resolver = new PendingDnsResolver(Dns.GetHostAddressesAsync);
 
         private readonly string _endpointUrl;
         private readonly string _apiKey;
@@ -184,11 +185,8 @@ namespace Framedash
             }
         }
 
-        // An IP-literal host is used directly (no DNS). The async resolve runs on the thread
-        // pool and is ABANDONED on timeout (bounded to one leaked worker on the rare
-        // FlushBlocking path) rather than blocking the main thread past the budget -- a stalled
-        // synchronous DNS lookup is exactly the hang this guards against. Never throws; returns
-        // false on timeout, failure, or empty result.
+        // Unity's supported resolver cannot cancel a lookup, so timed-out flushes
+        // must share the pending operation instead of starting more resolver work.
         private static bool TryResolveWithinBudget(string host, long budgetMs, out IPAddress[] candidates)
         {
             candidates = System.Array.Empty<IPAddress>();
@@ -201,13 +199,8 @@ namespace Framedash
             if (budgetMs <= 0) return false;
             try
             {
-                var task = Dns.GetHostAddressesAsync(host);
                 int waitMs = budgetMs > int.MaxValue ? int.MaxValue : (int)budgetMs;
-                // Wait bounds the main-thread block; a stalled resolver returns false here
-                // and the still-running task is left to the thread pool (not awaited).
-                if (!task.Wait(waitMs)) return false;
-                IPAddress[] addresses = task.Result;
-                if (addresses == null || addresses.Length == 0) return false;
+                if (!Resolver.TryResolve(host, waitMs, out IPAddress[] addresses)) return false;
                 var ordered = new List<IPAddress>(addresses.Length);
                 foreach (var a in addresses)
                     if (a.AddressFamily == AddressFamily.InterNetwork) ordered.Add(a);
