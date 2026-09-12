@@ -18,32 +18,11 @@ using System.Threading;
 namespace Framedash
 {
     /// <summary>
-    /// Synchronous, budget-bounded HTTP POST for <see cref="TelemetrySDK.FlushBlocking"/>.
-    /// The blocking flush runs on a main thread that cannot pump Unity's coroutine /
-    /// UnityWebRequest path, so the request is driven straight through System.Net
-    /// sockets, modeled on the Godot SDK's proven synchronous teardown drain
-    /// (TransportLayer.PostBlocking) and the direct-socket fallback here
-    /// (<see cref="DirectSocketSender"/>).
-    ///
-    /// Bounding: a single linked <see cref="CancellationTokenSource"/> is armed with
-    /// <c>CancelAfter(remainingBudget)</c> and CLOSES the socket when it fires, which
-    /// faults whichever blocking step is in progress (DNS resolve, connect, TLS
-    /// handshake, write, or status read) into the catch. Send/ReceiveTimeout are
-    /// belt-and-braces per-op caps. So every step is bounded and the total wall time
-    /// never exceeds the remaining flush budget, even though each individual
-    /// System.Net call has no timeout parameter.
-    ///
-    /// Security: connect is by HOSTNAME (HttpClient/OS resolves), so TLS runs the FULL
-    /// standard certificate validation (chain, expiry, hostname match) against the real
-    /// FQDN -- no IP-literal pinning is needed on this one-shot path (the async
-    /// fallback's IPv4-preference is a per-flush latency optimization, and the budget
-    /// already caps a slow resolve). Endpoint transport-security (HTTPS, or HTTP only
-    /// for loopback) is enforced by the caller before this runs.
-    ///
-    /// BCL-only but excluded from the NextUnit assembly like DirectSocketSender, because
-    /// exercising it requires a live TLS endpoint; the testable pieces (budget /
-    /// leading-count state machine, request-head formatting) live in
-    /// <see cref="BlockingFlush"/> and <see cref="RawHttpMessage"/>.
+    /// A blocked main thread cannot advance coroutine delivery, so this path uses sockets.
+    /// Closing a socket cannot cancel DNS: the transport retains one pending lookup while
+    /// callers bound their wait. Cancellation closes sockets during connect, TLS and HTTP.
+    /// Connecting to a resolved IP must not bypass TLS identity checks; authentication
+    /// retains the original hostname and standard certificate validation.
     /// </summary>
     internal sealed class BlockingHttpSender
     {

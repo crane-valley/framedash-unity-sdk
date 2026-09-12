@@ -10,12 +10,15 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 Prepared in source; the public v0.1.8 tag is not yet verified.
 
-Shutdown preserves a recovered in-memory envelope for its last best-effort send.
-With persistence disabled, memory retention cannot survive process exit.
+Shutdown attempts both recovered and buffered envelopes asynchronously without
+merging their dedup identities. The player loop must continue; with persistence
+disabled, immediate process exit can interrupt delivery.
 
 Failed offline-queue acknowledgements now make blocking flush return false and
 pause later positional acknowledgements until reinitialization. Tracking APIs
 expose nullable metadata for optional references and non-null event names.
+Initialization parameters and the optional session ID carry nullable metadata;
+the `Initialize` return value remains non-null.
 
 ### Added
 

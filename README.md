@@ -415,6 +415,9 @@ bool delivered = TelemetrySDK.Instance.FlushBlocking(timeoutMs: 2000);
 - A failed offline-queue acknowledgement returns `false` and logs a warning.
   Later positional acknowledgements pause until reinitialization to avoid
   removing the wrong queued prefix. Already delivered events may replay from disk.
+- With persistence disabled, `Shutdown` attempts both recovered and buffered
+  envelopes asynchronously while the player loop continues. Immediate process
+  exit can interrupt that attempt; call and check `FlushBlocking` before exit.
 - A batch whose delivery confirmation arrives only after the deadline is still
   acknowledged (it was delivered, so it is not resent -- no duplicate); the
   `false` return then only reports that confirmation missed the budget.

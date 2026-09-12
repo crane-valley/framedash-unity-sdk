@@ -403,7 +403,13 @@ namespace Framedash
                 }
                 else
                 {
-                    Flush();
+                    TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(_buffer.DequeueAll(), _inFlightBatch);
+                    if (envelopes.Length > 0)
+                    {
+                        Interlocked.Exchange(ref _isFlushing, 1);
+                        _inFlightBatch = envelopes[0];
+                        _inFlightFlush = StartCoroutine(FlushShutdownEnvelopes(envelopes, _flushGeneration));
+                    }
                 }
                 _initialized = false;
                 Debug.Log("[Framedash] SDK shut down.");
@@ -411,6 +417,29 @@ namespace Framedash
             catch (Exception e)
             {
                 Debug.LogError($"[Framedash] Shutdown() failed: {e}");
+            }
+        }
+
+        private IEnumerator FlushShutdownEnvelopes(TelemetryEvent[][] envelopes, int generation)
+        {
+            try
+            {
+                // Capture both envelopes before disabling the SDK; Flush() then rejects further work.
+                foreach (TelemetryEvent[] events in envelopes)
+                {
+                    if (generation != _flushGeneration) yield break;
+                    _inFlightBatch = events;
+                    yield return _transport.SendBatch(events, new DeliveryResult());
+                }
+            }
+            finally
+            {
+                if (generation == _flushGeneration)
+                {
+                    _inFlightFlush = null;
+                    _inFlightBatch = null;
+                    Interlocked.Exchange(ref _isFlushing, 0);
+                }
             }
         }
 

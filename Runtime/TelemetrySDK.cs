@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -7,7 +9,7 @@ namespace Framedash
 {
     public sealed partial class TelemetrySDK : MonoBehaviour
     {
-        private static TelemetrySDK s_instance;
+        private static TelemetrySDK? s_instance;
         private const int DefaultMaxBatchSize = 100;
         // Matches the consumer's MAX_EVENTS_PER_BATCH (packages/ingest-core/src/config.ts):
         // a batch larger than the server cap is rejected wholesale, so allowing the
@@ -24,9 +26,9 @@ namespace Framedash
 
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";
-        [SerializeField] private string _apiKey;
-        [SerializeField] private string _buildId;
-        [SerializeField] private string _playerId;
+        [SerializeField] private string _apiKey = "";
+        [SerializeField] private string _buildId = "";
+        [SerializeField] private string _playerId = "";
         [SerializeField] private bool _captureCameraRotation = true;
 
         [Header("Batching")]
@@ -55,13 +57,14 @@ namespace Framedash
         // Disable for a pure in-memory buffer with no disk writes.
         [SerializeField] private bool _enableOfflineQueue = true;
 
-        private EventBuffer _buffer;
-        private TransportLayer _transport;
-        private SessionManager _session;
-        private PerformanceCollector _perfCollector;
-        private SamplingPolicy _samplingPolicy;
-        private FlushPolicy _flushPolicy;
-        private Coroutine _flushCoroutine;
+        // Unity constructs this component before InitializeInternal; _initialized gates these services.
+        private EventBuffer _buffer = null!;
+        private TransportLayer _transport = null!;
+        private SessionManager _session = null!;
+        private PerformanceCollector _perfCollector = null!;
+        private SamplingPolicy _samplingPolicy = null!;
+        private FlushPolicy _flushPolicy = null!;
+        private Coroutine? _flushCoroutine;
         private bool _initialized;
         private int _estimatedPayloadBytes;
         private int _isFlushing;
@@ -71,13 +74,13 @@ namespace Framedash
         private int _flushGeneration;
         private volatile bool _flushRequested;
         private bool _warnedEmptyPlayerId;
-        private string _cachedPlatform;
-        private string _cachedEngineVersion;
+        private string _cachedPlatform = "";
+        private string _cachedEngineVersion = "";
         // The automated-session (CI) build_id override and ci.* attributes live together in
         // the SessionManager as one immutable snapshot (see SessionManager.ResolveSessionStamp),
         // so the configured _buildId is never overwritten and the stamping path reads the
         // build_id and the tags from a single consistent point.
-        private IPersistenceProvider _persistence;
+        private IPersistenceProvider _persistence = null!;
         // Captured from _enableOfflineQueue at init so a later inspector toggle cannot desync
         // the live provider mid-session.
         private bool _offlineQueueActive;
@@ -96,12 +99,12 @@ namespace Framedash
         // The batch an in-flight FlushCoroutine is sending, retained so Shutdown can stop
         // that coroutine and let its (generation-gated) finally persist the undelivered
         // events instead of losing them on quit.
-        private Coroutine _inFlightFlush;
+        private Coroutine? _inFlightFlush;
         // The batch + persisted-prefix count that in-flight FlushCoroutine is sending,
         // captured alongside _inFlightFlush so FlushBlocking can reclaim and synchronously
         // deliver them: the blocked main thread cannot let that coroutine advance, so its
         // already-dequeued events would otherwise be stranded. Main-thread only.
-        private TelemetryEvent[] _inFlightBatch;
+        private TelemetryEvent[]? _inFlightBatch;
         private int _inFlightPersistedCount;
         // Captured on the main thread at Awake so FlushBlocking can reject an
         // off-main-thread call: it must never marshal-and-block, which would deadlock
@@ -112,7 +115,7 @@ namespace Framedash
         // or the FRAMEDASH_API_KEY fallback. Retained so the synchronous FlushBlocking path
         // uses the SAME credential as the async transport (which stores it privately). Never
         // promoted into _apiKey (see InitializeInternal).
-        private string _effectiveApiKey;
+        private string _effectiveApiKey = "";
         // Camera yaw/pitch sampled once per frame (Update) and stamped onto events,
         // mirroring the per-frame performance cache. Packed into one long and
         // published/read atomically so the (yaw, pitch) pair is always observed
@@ -120,8 +123,8 @@ namespace Framedash
         private long _cameraSnapshot = CameraMath.CameraAbsent;
         private const float HeartbeatIntervalSeconds = 10f;
         private float _timeSinceLastHeartbeat;
-        private IoStats _ioStats;
-        private IIoMetricsSource _ioSource;
+        private IoStats _ioStats = null!;
+        private IIoMetricsSource _ioSource = null!;
         // Memory readings (mem.vram, mem.heap): sampled fresh only on perf_heartbeat --
         // no windowing needed since Profiler exposes instantaneous totals, unlike the
         // cumulative io.* counters. Always non-null (the Profiler APIs are safe to
@@ -138,9 +141,9 @@ namespace Framedash
         // metrics map as load_time_ms on a "map_load" event (no proto/CH change,
         // mirroring the io.* attributes-map guardrail). Recreated on each (re-)init
         // so a new session never completes a load begun by a prior one.
-        private MapLoadTimer _mapLoadTimer;
+        private MapLoadTimer _mapLoadTimer = null!;
 
-        public string SessionId
+        public string? SessionId
         {
             get
             {
@@ -231,7 +234,7 @@ namespace Framedash
         /// integration (which auto-creates the component) can opt out, since the inspector
         /// field is never seen.
         /// </summary>
-        public static TelemetrySDK Initialize(string apiKey = null, string endpointUrl = null, string buildId = null, string playerId = null, bool enableOfflineQueue = true)
+        public static TelemetrySDK Initialize(string? apiKey = null, string? endpointUrl = null, string? buildId = null, string? playerId = null, bool enableOfflineQueue = true)
         {
             var sdk = Instance;
             // Only overwrite the configured key when an explicit non-empty argument is
