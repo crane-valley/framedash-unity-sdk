@@ -15,61 +15,64 @@ namespace Framedash
         {
             try
             {
-                if (!_initialized)
+                lock (_lifecycleGate)
                 {
-                    Debug.LogWarning("[Framedash] SDK not initialized. Call Initialize() first.");
-                    return;
+                    if (!_initialized)
+                    {
+                        Debug.LogWarning("[Framedash] SDK not initialized. Call Initialize() first.");
+                        return;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(eventName))
+                    {
+                        Debug.LogWarning("[Framedash] eventName must not be null, empty, or whitespace. Event dropped.");
+                        return;
+                    }
+
+                    if (!_warnedEmptyPlayerId && string.IsNullOrEmpty(_session.PlayerId))
+                    {
+                        _warnedEmptyPlayerId = true;
+                        Debug.LogWarning("[Framedash] No player_id set. Events will be sent as anonymous. Call SetPlayerId() to associate events with a player.");
+                    }
+
+                    // Normalize event name first so sampling and the wire-side event use the
+                    // same key — overrides registered for long names must match the truncated
+                    // form that actually leaves the SDK and that ingest validation accepts.
+                    string safeEventName = FieldClamp.TruncateEventName(eventName);
+
+                    // Sampling check — skip expensive perf collection if event is dropped
+                    if (!_samplingPolicy.ShouldSample(safeEventName))
+                        return;
+
+                    // Convert Dictionary parameters to serializable List types, enforcing the
+                    // ingest-core caps client-side (count, key/value length, finite metrics) so a
+                    // single oversized map cannot make the consumer drop the whole flush.
+                    List<StringPair>? attrList = FieldClamp.ClampAttributes(attributes);
+                    List<FloatPair>? metricList = FieldClamp.ClampMetrics(metrics);
+
+                    string safeMapId = FieldClamp.Truncate(mapId ?? "", FieldClamp.MaxMapIdLength);
+
+                    // Position-qualified events (non-empty map id) also carry the cached
+                    // mem.* reading so the spatial heatmap grid query (map_id + cell bounds)
+                    // sees real memory data -- perf_heartbeat alone has an empty map_id and
+                    // never reaches that grid. Attaches from the cache only (refreshed at
+                    // heartbeat cadence in TrackAutomated): no Profiler call on this per-event
+                    // path. A caller-supplied metric of the same key name is never clobbered.
+                    if (safeMapId.Length > 0)
+                    {
+                        metricList = _memCache.AppendTo(metricList);
+                    }
+
+                    TrackInternal(
+                        safeEventName,
+                        safeMapId,
+                        FieldClamp.SanitizeCoord(position?.x ?? 0f),
+                        FieldClamp.SanitizeCoord(position?.y ?? 0f),
+                        FieldClamp.SanitizeCoord(position?.z ?? 0f),
+                        TelemetrySource.Player,
+                        attrList,
+                        metricList);
                 }
-
-                if (string.IsNullOrWhiteSpace(eventName))
-                {
-                    Debug.LogWarning("[Framedash] eventName must not be null, empty, or whitespace. Event dropped.");
-                    return;
-                }
-
-                if (!_warnedEmptyPlayerId && string.IsNullOrEmpty(_session.PlayerId))
-                {
-                    _warnedEmptyPlayerId = true;
-                    Debug.LogWarning("[Framedash] No player_id set. Events will be sent as anonymous. Call SetPlayerId() to associate events with a player.");
-                }
-
-                // Normalize event name first so sampling and the wire-side event use the
-                // same key — overrides registered for long names must match the truncated
-                // form that actually leaves the SDK and that ingest validation accepts.
-                string safeEventName = FieldClamp.TruncateEventName(eventName);
-
-                // Sampling check — skip expensive perf collection if event is dropped
-                if (!_samplingPolicy.ShouldSample(safeEventName))
-                    return;
-
-                // Convert Dictionary parameters to serializable List types, enforcing the
-                // ingest-core caps client-side (count, key/value length, finite metrics) so a
-                // single oversized map cannot make the consumer drop the whole flush.
-                List<StringPair>? attrList = FieldClamp.ClampAttributes(attributes);
-                List<FloatPair>? metricList = FieldClamp.ClampMetrics(metrics);
-
-                string safeMapId = FieldClamp.Truncate(mapId ?? "", FieldClamp.MaxMapIdLength);
-
-                // Position-qualified events (non-empty map id) also carry the cached
-                // mem.* reading so the spatial heatmap grid query (map_id + cell bounds)
-                // sees real memory data -- perf_heartbeat alone has an empty map_id and
-                // never reaches that grid. Attaches from the cache only (refreshed at
-                // heartbeat cadence in TrackAutomated): no Profiler call on this per-event
-                // path. A caller-supplied metric of the same key name is never clobbered.
-                if (safeMapId.Length > 0)
-                {
-                    metricList = _memCache.AppendTo(metricList);
-                }
-
-                TrackInternal(
-                    safeEventName,
-                    safeMapId,
-                    FieldClamp.SanitizeCoord(position?.x ?? 0f),
-                    FieldClamp.SanitizeCoord(position?.y ?? 0f),
-                    FieldClamp.SanitizeCoord(position?.z ?? 0f),
-                    TelemetrySource.Player,
-                    attrList,
-                    metricList);
             }
             catch (Exception e)
             {

@@ -221,7 +221,7 @@ does not distort the measurement. Calling `BeginMapLoad` again before `EndMapLoa
 replaces the pending measurement; `EndMapLoad` with no pending `BeginMapLoad` is a
 no-op. A NaN/Infinity/negative `ReportMapLoad` time is dropped (not clamped). All
 three methods never throw and are no-ops before `Initialize()`. Call them on Unity's
-main thread (like `Track()`, the emission reads main-thread-only Unity APIs) -- if a
+main thread -- if a
 custom loader completes on a worker thread, dispatch `EndMapLoad`/`ReportMapLoad`
 back to the main thread.
 
@@ -247,7 +247,7 @@ Whitespace-only event names are also dropped (ingest requires a non-empty name).
 
 ## Camera Direction
 
-When **Capture Camera Rotation** is enabled (the default), every event records the main camera's yaw and pitch, which powers the direction breakdown on the heatmap cell-detail view. The SDK samples `Camera.main` once per frame and stamps events with that value (the same per-frame caching used for performance metrics); like all SDK methods, `Track()` is intended to be called on Unity's main thread. If no camera tagged `MainCamera` exists (for example a headless or dedicated build), the fields are simply omitted. Yaw is normalized to `[0, 360)` and increases clockwise; the direction chart labels yaw 0 as North, with the engine's forward axis as that reference (a game world has no geographic North, so the compass labels are relative). Pitch is `[-90, 90]` (+90 = looking up).
+When **Capture Camera Rotation** is enabled (the default), every event records the main camera's yaw and pitch, which powers the direction breakdown on the heatmap cell-detail view. The SDK samples `Camera.main` once per frame and stamps events with that value (the same per-frame caching used for performance metrics); initialize and shut down the SDK on Unity's main thread. Worker threads may call `Track()` through the initialized instance. An admitted tracking call finishes before shutdown drains its queue or reinitialization replaces its session. If no camera tagged `MainCamera` exists (for example a headless or dedicated build), the fields are simply omitted. Yaw is normalized to `[0, 360)` and increases clockwise; the direction chart labels yaw 0 as North, with the engine's forward axis as that reference (a game world has no geographic North, so the compass labels are relative). Pitch is `[-90, 90]` (+90 = looking up).
 
 Disable it by unchecking **Capture Camera Rotation** on the `TelemetrySDK` component inspector, or from code (including the `TelemetrySDK.Initialize(...)` path) via `TelemetrySDK.Instance.CaptureCameraRotation = false;`.
 

@@ -10,6 +10,7 @@ namespace Framedash
     public sealed partial class TelemetrySDK : MonoBehaviour
     {
         private static TelemetrySDK? s_instance;
+        private readonly object _lifecycleGate = new object();
         private const int DefaultMaxBatchSize = 100;
         // Matches the consumer's MAX_EVENTS_PER_BATCH (packages/ingest-core/src/config.ts):
         // a batch larger than the server cap is rejected wholesale, so allowing the
@@ -237,17 +238,20 @@ namespace Framedash
         public static TelemetrySDK Initialize(string? apiKey = null, string? endpointUrl = null, string? buildId = null, string? playerId = null, bool enableOfflineQueue = true)
         {
             var sdk = Instance;
-            // Only overwrite the configured key when an explicit non-empty argument is
-            // given. A null/empty apiKey means "keep whatever is configured" (e.g. an
-            // Inspector key) so a caller passing Initialize(null, ...) purely to set other
-            // options does not wipe the Inspector key and hand precedence to the env var.
-            // Precedence stays: explicit non-empty arg > Inspector field > FRAMEDASH_API_KEY.
-            if (!string.IsNullOrEmpty(apiKey)) sdk._apiKey = apiKey;
-            if (!string.IsNullOrEmpty(endpointUrl)) sdk._endpointUrl = endpointUrl;
-            if (!string.IsNullOrEmpty(buildId)) sdk._buildId = buildId;
-            if (playerId != null) sdk._playerId = playerId;
-            sdk._enableOfflineQueue = enableOfflineQueue;
-            sdk.InitializeInternal();
+            lock (sdk._lifecycleGate)
+            {
+                // Only overwrite the configured key when an explicit non-empty argument is
+                // given. A null/empty apiKey means "keep whatever is configured" (e.g. an
+                // Inspector key) so a caller passing Initialize(null, ...) purely to set other
+                // options does not wipe the Inspector key and hand precedence to the env var.
+                // Precedence stays: explicit non-empty arg > Inspector field > FRAMEDASH_API_KEY.
+                if (!string.IsNullOrEmpty(apiKey)) sdk._apiKey = apiKey;
+                if (!string.IsNullOrEmpty(endpointUrl)) sdk._endpointUrl = endpointUrl;
+                if (!string.IsNullOrEmpty(buildId)) sdk._buildId = buildId;
+                if (playerId != null) sdk._playerId = playerId;
+                sdk._enableOfflineQueue = enableOfflineQueue;
+                sdk.InitializeInternal();
+            }
             return sdk;
         }
 
@@ -365,124 +369,127 @@ namespace Framedash
 
         private void InitializeInternal()
         {
-            if (_initialized) return;
-            // Resolve the effective key FRESH on every initialization (F32): the
-            // configured key (Inspector/explicit arg) wins, otherwise the CURRENT
-            // FRAMEDASH_API_KEY. Resolve into a LOCAL and never promote it into _apiKey --
-            // promoting the env value would freeze the first read, so a changed
-            // FRAMEDASH_API_KEY after Shutdown() + Initialize() in the same process would
-            // never be picked up and the config-vs-env precedence would blur. _apiKey
-            // stays the configured key only; effectiveApiKey feeds the transport and the
-            // offline-queue partition key below.
-            string effectiveApiKey = ResolveApiKey();
-            if (string.IsNullOrEmpty(effectiveApiKey))
+            lock (_lifecycleGate)
             {
-                Debug.LogError("[Framedash] API key is required. Set it via TelemetrySDK.Initialize(apiKey), the Inspector, or the FRAMEDASH_API_KEY environment variable.");
-                return;
-            }
-
-            if (!Uri.TryCreate(_endpointUrl, UriKind.Absolute, out var parsedUri) ||
-                (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps))
-            {
-                Debug.LogError("[Framedash] endpointUrl must be a valid HTTP(S) URL.");
-                return;
-            }
-
-            int maxBatchSize = ResolveMaxBatchSize();
-            // Retained envelopes and active sends belong to the previous endpoint/key.
-            if (_inFlightFlush != null)
-            {
-                StopCoroutine(_inFlightFlush);
-                _transport?.AbortInFlightRequest();
-                _inFlightFlush = null;
-            }
-            _inFlightBatch = null;
-            _inFlightPersistedCount = 0;
-            // Re-init starts fresh: clear flush state left over from a prior session
-            // (Shutdown then Initialize) so a previous in-flight flush cannot block the
-            // new session's flushes -- including session_start -- via the single-flight
-            // guard. Bump the generation so a stale FlushCoroutine completion from a
-            // prior session will not release this session's flush guard (see FlushCoroutine).
-            _flushRequested = false;
-            Interlocked.Exchange(ref _isFlushing, 0);
-            Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
-            _flushGeneration++;
-            _offlineQueueActive = _enableOfflineQueue;
-            // A fresh session owns no automated-session state: the SessionManager (which holds
-            // the build_id override + ci.* snapshot) is recreated below, so a prior Begin
-            // without an End cannot keep stamping events under the candidate build.
-
-            int bufferCapacity = ResolveEventBufferCapacity(maxBatchSize);
-            // With the offline queue on, the buffer must hold the entire restored queue
-            // plus a batch without the ring dropping a restored event -- otherwise the
-            // in-memory head would stop matching the on-disk head and an ack (DropOldest)
-            // could remove the wrong persisted events. Floor the capacity at
-            // MaxPersistedEvents + maxBatchSize (matching the UE5 EventBufferCapacity).
-            if (_offlineQueueActive)
-            {
-                int offlineFloor = FilePersistence.MaxPersistedEvents + maxBatchSize;
-                if (bufferCapacity < offlineFloor) bufferCapacity = offlineFloor;
-            }
-            _buffer = new EventBuffer(bufferCapacity);
-
-            // Offline queue: pick the provider and restore any events a prior run (or a
-            // Shutdown) persisted. Restored events are enqueued into the fresh buffer
-            // first, so they sit at the head and flush before new events.
-            // _pendingPersistedEventsToAck records how many leading buffer events are
-            // already on disk (capped at the buffer's count, a belt-and-braces guard on
-            // top of the capacity floor above).
-            // Partition the on-disk queue by ingest config (endpoint + API key) so moving
-            // the same install between local/staging/prod, or rotating keys, never resends
-            // one project's events to another.
-            _persistence = _offlineQueueActive
-                ? (IPersistenceProvider)new FilePersistence(FilePersistence.DefaultQueueFilePath(_endpointUrl + "\n" + effectiveApiKey))
-                : new NullPersistence();
-            _pendingPersistedEventsToAck = 0;
-            _persistenceAcknowledgementFailed = false;
-            if (_offlineQueueActive)
-            {
-                TelemetryEvent[] restored = _persistence.Load();
-                if (restored.Length > 0)
+                if (_initialized) return;
+                // Resolve the effective key FRESH on every initialization (F32): the
+                // configured key (Inspector/explicit arg) wins, otherwise the CURRENT
+                // FRAMEDASH_API_KEY. Resolve into a LOCAL and never promote it into _apiKey --
+                // promoting the env value would freeze the first read, so a changed
+                // FRAMEDASH_API_KEY after Shutdown() + Initialize() in the same process would
+                // never be picked up and the config-vs-env precedence would blur. _apiKey
+                // stays the configured key only; effectiveApiKey feeds the transport and the
+                // offline-queue partition key below.
+                string effectiveApiKey = ResolveApiKey();
+                if (string.IsNullOrEmpty(effectiveApiKey))
                 {
-                    foreach (var restoredEvent in restored) _buffer.Enqueue(restoredEvent);
-                    _pendingPersistedEventsToAck = Math.Min(restored.Length, _buffer.Count);
-                    Debug.Log($"[Framedash] Restored {restored.Length} persisted event(s) to the offline queue.");
+                    Debug.LogError("[Framedash] API key is required. Set it via TelemetrySDK.Initialize(apiKey), the Inspector, or the FRAMEDASH_API_KEY environment variable.");
+                    return;
                 }
+
+                if (!Uri.TryCreate(_endpointUrl, UriKind.Absolute, out var parsedUri) ||
+                    (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps))
+                {
+                    Debug.LogError("[Framedash] endpointUrl must be a valid HTTP(S) URL.");
+                    return;
+                }
+
+                int maxBatchSize = ResolveMaxBatchSize();
+                // Retained envelopes and active sends belong to the previous endpoint/key.
+                if (_inFlightFlush != null)
+                {
+                    StopCoroutine(_inFlightFlush);
+                    _transport?.AbortInFlightRequest();
+                    _inFlightFlush = null;
+                }
+                _inFlightBatch = null;
+                _inFlightPersistedCount = 0;
+                // Re-init starts fresh: clear flush state left over from a prior session
+                // (Shutdown then Initialize) so a previous in-flight flush cannot block the
+                // new session's flushes -- including session_start -- via the single-flight
+                // guard. Bump the generation so a stale FlushCoroutine completion from a
+                // prior session will not release this session's flush guard (see FlushCoroutine).
+                _flushRequested = false;
+                Interlocked.Exchange(ref _isFlushing, 0);
+                Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
+                _flushGeneration++;
+                _offlineQueueActive = _enableOfflineQueue;
+                // A fresh session owns no automated-session state: the SessionManager (which holds
+                // the build_id override + ci.* snapshot) is recreated below, so a prior Begin
+                // without an End cannot keep stamping events under the candidate build.
+
+                int bufferCapacity = ResolveEventBufferCapacity(maxBatchSize);
+                // With the offline queue on, the buffer must hold the entire restored queue
+                // plus a batch without the ring dropping a restored event -- otherwise the
+                // in-memory head would stop matching the on-disk head and an ack (DropOldest)
+                // could remove the wrong persisted events. Floor the capacity at
+                // MaxPersistedEvents + maxBatchSize (matching the UE5 EventBufferCapacity).
+                if (_offlineQueueActive)
+                {
+                    int offlineFloor = FilePersistence.MaxPersistedEvents + maxBatchSize;
+                    if (bufferCapacity < offlineFloor) bufferCapacity = offlineFloor;
+                }
+                _buffer = new EventBuffer(bufferCapacity);
+
+                // Offline queue: pick the provider and restore any events a prior run (or a
+                // Shutdown) persisted. Restored events are enqueued into the fresh buffer
+                // first, so they sit at the head and flush before new events.
+                // _pendingPersistedEventsToAck records how many leading buffer events are
+                // already on disk (capped at the buffer's count, a belt-and-braces guard on
+                // top of the capacity floor above).
+                // Partition the on-disk queue by ingest config (endpoint + API key) so moving
+                // the same install between local/staging/prod, or rotating keys, never resends
+                // one project's events to another.
+                _persistence = _offlineQueueActive
+                    ? (IPersistenceProvider)new FilePersistence(FilePersistence.DefaultQueueFilePath(_endpointUrl + "\n" + effectiveApiKey))
+                    : new NullPersistence();
+                _pendingPersistedEventsToAck = 0;
+                _persistenceAcknowledgementFailed = false;
+                if (_offlineQueueActive)
+                {
+                    TelemetryEvent[] restored = _persistence.Load();
+                    if (restored.Length > 0)
+                    {
+                        foreach (var restoredEvent in restored) _buffer.Enqueue(restoredEvent);
+                        _pendingPersistedEventsToAck = Math.Min(restored.Length, _buffer.Count);
+                        Debug.Log($"[Framedash] Restored {restored.Length} persisted event(s) to the offline queue.");
+                    }
+                }
+                // Baseline for the head-alignment guard (see Flush). The capacity floor above
+                // means restore itself never drops, so this captures a clean starting point.
+                _persistedDropBaseline = _buffer.DroppedCount;
+
+                // Retain the effective key so the synchronous FlushBlocking path sends with
+                // the same credential as the async transport.
+                _effectiveApiKey = effectiveApiKey;
+                _transport = new TransportLayer(_endpointUrl, effectiveApiKey, SdkVersion, _maxPayloadBytes, _verboseLogging);
+                _session = new SessionManager(_playerId);
+                _perfCollector = new PerformanceCollector();
+                _perfCollector.UpdateFrameTimings();
+                // Reset the camera snapshot so a re-init (Shutdown then Initialize) does
+                // not stamp session_start / pre-first-Update events with a stale reading.
+                Interlocked.Exchange(ref _cameraSnapshot, CameraMath.CameraAbsent);
+                _samplingPolicy = new SamplingPolicy(_samplingRate);
+                _flushPolicy = new FlushPolicy(maxBatchSize, _maxPayloadBytes, _flushIntervalSeconds);
+                _cachedPlatform = FieldClamp.Truncate(Application.platform.ToString(), FieldClamp.MaxPlatformLength);
+                _cachedEngineVersion = FieldClamp.Truncate(Application.unityVersion, FieldClamp.MaxEngineVersionLength);
+
+                _timeSinceLastHeartbeat = 0f;
+                _ioStats = new IoStats();
+                _ioSource = AsyncReadManagerIoSource.TryCreate();
+                // Eager first sample at init (rather than a lazy sample on the first
+                // qualifying event) so a position-qualified Track() call in the first
+                // ~10s of a session -- before the first heartbeat -- is not blind. This
+                // is a one-time init cost, not a per-event one, so it does not conflict
+                // with the "no Profiler calls on the per-event path" rule below.
+                _memCache.Refresh(_memSource);
+                _mapLoadTimer = new MapLoadTimer();
+                _flushCoroutine = StartCoroutine(FlushLoop());
+                _initialized = true;
+
+                Debug.Log($"[Framedash] SDK initialized. Session: {_session.SessionId}");
+                TrackAutomated("session_start");
             }
-            // Baseline for the head-alignment guard (see Flush). The capacity floor above
-            // means restore itself never drops, so this captures a clean starting point.
-            _persistedDropBaseline = _buffer.DroppedCount;
-
-            // Retain the effective key so the synchronous FlushBlocking path sends with
-            // the same credential as the async transport.
-            _effectiveApiKey = effectiveApiKey;
-            _transport = new TransportLayer(_endpointUrl, effectiveApiKey, SdkVersion, _maxPayloadBytes, _verboseLogging);
-            _session = new SessionManager(_playerId);
-            _perfCollector = new PerformanceCollector();
-            _perfCollector.UpdateFrameTimings();
-            // Reset the camera snapshot so a re-init (Shutdown then Initialize) does
-            // not stamp session_start / pre-first-Update events with a stale reading.
-            Interlocked.Exchange(ref _cameraSnapshot, CameraMath.CameraAbsent);
-            _samplingPolicy = new SamplingPolicy(_samplingRate);
-            _flushPolicy = new FlushPolicy(maxBatchSize, _maxPayloadBytes, _flushIntervalSeconds);
-            _cachedPlatform = FieldClamp.Truncate(Application.platform.ToString(), FieldClamp.MaxPlatformLength);
-            _cachedEngineVersion = FieldClamp.Truncate(Application.unityVersion, FieldClamp.MaxEngineVersionLength);
-
-            _timeSinceLastHeartbeat = 0f;
-            _ioStats = new IoStats();
-            _ioSource = AsyncReadManagerIoSource.TryCreate();
-            // Eager first sample at init (rather than a lazy sample on the first
-            // qualifying event) so a position-qualified Track() call in the first
-            // ~10s of a session -- before the first heartbeat -- is not blind. This
-            // is a one-time init cost, not a per-event one, so it does not conflict
-            // with the "no Profiler calls on the per-event path" rule below.
-            _memCache.Refresh(_memSource);
-            _mapLoadTimer = new MapLoadTimer();
-            _flushCoroutine = StartCoroutine(FlushLoop());
-            _initialized = true;
-
-            Debug.Log($"[Framedash] SDK initialized. Session: {_session.SessionId}");
-            TrackAutomated("session_start");
         }
 
         private int ResolveMaxBatchSize()

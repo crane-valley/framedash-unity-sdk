@@ -54,7 +54,10 @@ the `Initialize` return value remains non-null.
   endpoint's retained state. The performance-run entry point now exposes its
   required options parameter to nullable-enabled callers.
 - Background event tracking reads frame-time and memory values cached on the main
-  thread, avoiding Unity API exceptions. Performance-run begin/end report marker
+  thread, avoiding Unity API exceptions. Tracking admission and enqueueing are
+  synchronized with shutdown and reinitialization so an admitted call finishes
+  before the old queue is drained or its session state is replaced.
+  Performance-run begin/end report marker
   admission failures, and buffer overflow during capture prevents a successful end.
 - Editor JSON parsing rejects more than 64 nested containers before recursion can
   exhaust the stack; wide map and heatmap responses remain supported.

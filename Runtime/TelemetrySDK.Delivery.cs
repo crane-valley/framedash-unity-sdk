@@ -368,54 +368,57 @@ namespace Framedash
         {
             try
             {
-                if (!_initialized) return;
-                if (_flushCoroutine != null) StopCoroutine(_flushCoroutine);
-                EndPerformanceRun(completed: false);
-                // A normal send's finalizer must retain its tail when stopped during shutdown.
-                _initialized = false;
-                // The finalizer owns persistence or recovery; clearing its retained tail
-                // would drop a failed blocking batch before the last best-effort send.
-                if (_inFlightFlush != null)
+                lock (_lifecycleGate)
                 {
-                    StopCoroutine(_inFlightFlush);
-                    _inFlightFlush = null;
-                    // Unity may leave yielded transport iterators alive after stopping the owner.
-                    _transport.AbortInFlightRequest();
-                }
-                if (_offlineQueueActive)
-                {
-                    // Persist whatever is still buffered instead of a best-effort network
-                    // flush: a synchronous disk write completes before the app exits, and
-                    // the offline queue resends next run. An in-flight periodic flush at
-                    // this instant is not captured -- the same best-effort limitation that
-                    // applies to any in-flight send on a hard exit.
-                    TelemetryEvent[] remaining = _buffer.DequeueAll();
-                    // Skip the leading block already on disk (restored this run and not yet
-                    // flushed); appending it would double-persist those events and resend
-                    // them twice next run. Only the fresh tail needs persisting.
-                    int alreadyPersisted = Math.Min(_pendingPersistedEventsToAck, remaining.Length);
-                    int freshCount = remaining.Length - alreadyPersisted;
-                    if (freshCount > 0)
+                    if (!_initialized) return;
+                    if (_flushCoroutine != null) StopCoroutine(_flushCoroutine);
+                    EndPerformanceRun(completed: false);
+                    // A normal send's finalizer must retain its tail when stopped during shutdown.
+                    _initialized = false;
+                    // The finalizer owns persistence or recovery; clearing its retained tail
+                    // would drop a failed blocking batch before the last best-effort send.
+                    if (_inFlightFlush != null)
                     {
-                        var fresh = new TelemetryEvent[freshCount];
-                        Array.Copy(remaining, alreadyPersisted, fresh, 0, freshCount);
-                        if (_persistence.Append(fresh))
-                            Debug.Log($"[Framedash] Shutdown: persisted {freshCount} buffered event(s) for next run.");
-                        else
-                            Debug.LogWarning($"[Framedash] Shutdown: {freshCount} buffered event(s) could not be persisted.");
+                        StopCoroutine(_inFlightFlush);
+                        _inFlightFlush = null;
+                        // Unity may leave yielded transport iterators alive after stopping the owner.
+                        _transport.AbortInFlightRequest();
                     }
-                }
-                else
-                {
-                    TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(_buffer.DequeueAll(), _inFlightBatch);
-                    if (envelopes.Length > 0)
+                    if (_offlineQueueActive)
                     {
-                        Interlocked.Exchange(ref _isFlushing, 1);
-                        _inFlightBatch = envelopes[0];
-                        _inFlightFlush = StartCoroutine(FlushShutdownEnvelopes(envelopes, _flushGeneration));
+                        // Persist whatever is still buffered instead of a best-effort network
+                        // flush: a synchronous disk write completes before the app exits, and
+                        // the offline queue resends next run. An in-flight periodic flush at
+                        // this instant is not captured -- the same best-effort limitation that
+                        // applies to any in-flight send on a hard exit.
+                        TelemetryEvent[] remaining = _buffer.DequeueAll();
+                        // Skip the leading block already on disk (restored this run and not yet
+                        // flushed); appending it would double-persist those events and resend
+                        // them twice next run. Only the fresh tail needs persisting.
+                        int alreadyPersisted = Math.Min(_pendingPersistedEventsToAck, remaining.Length);
+                        int freshCount = remaining.Length - alreadyPersisted;
+                        if (freshCount > 0)
+                        {
+                            var fresh = new TelemetryEvent[freshCount];
+                            Array.Copy(remaining, alreadyPersisted, fresh, 0, freshCount);
+                            if (_persistence.Append(fresh))
+                                Debug.Log($"[Framedash] Shutdown: persisted {freshCount} buffered event(s) for next run.");
+                            else
+                                Debug.LogWarning($"[Framedash] Shutdown: {freshCount} buffered event(s) could not be persisted.");
+                        }
                     }
+                    else
+                    {
+                        TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(_buffer.DequeueAll(), _inFlightBatch);
+                        if (envelopes.Length > 0)
+                        {
+                            Interlocked.Exchange(ref _isFlushing, 1);
+                            _inFlightBatch = envelopes[0];
+                            _inFlightFlush = StartCoroutine(FlushShutdownEnvelopes(envelopes, _flushGeneration));
+                        }
+                    }
+                    Debug.Log("[Framedash] SDK shut down.");
                 }
-                Debug.Log("[Framedash] SDK shut down.");
             }
             catch (Exception e)
             {
