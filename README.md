@@ -415,6 +415,11 @@ bool delivered = TelemetrySDK.Instance.FlushBlocking(timeoutMs: 2000);
   producer ring; a blocking retry returns `false` if those events must wait for
   a retained slot. Sustained producer overflow still follows the ring's existing
   drop-oldest policy.
+- If a disk append fails, its fresh tail stays in the corresponding retained
+  envelope without evicting concurrent producers. The current process retries it,
+  and shutdown tries to persist retained tails again. Restored events already on
+  disk are not appended again. In-memory data cannot survive process exit or SDK
+  reinitialization if persistence remains unavailable.
 - A failed offline-queue acknowledgement returns `false` and logs a warning.
   Later positional acknowledgements pause until reinitialization to avoid
   removing the wrong queued prefix. Already delivered events may replay from disk.

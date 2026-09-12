@@ -30,6 +30,8 @@ retained envelopes. A retry can return false while newly buffered events wait
 for a retained slot. Shutdown also attempts this third independent envelope.
 Worker performance reads now observe one complete cached refresh, including
 unavailable GPU/CPU timings, without allocating a snapshot on the hot path.
+Failed disk appends also retain fresh tails outside the producer ring. Shutdown
+retries persistence for retained envelopes without re-appending their disk prefix.
 
 ### Added
 

@@ -87,8 +87,8 @@ namespace Framedash
                     }
                     else
                     {
-                        ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount);
-                        _inFlightBatch = null;
+                        ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount, out _inFlightBatch);
+                        _inFlightPersistedCount = 0;
                     }
                     if (retainInMemory && _inFlightBatch == null && _initialized
                         && (_buffer.Count > 0 || _retainedBlockingBatch != null))
@@ -100,11 +100,15 @@ namespace Framedash
         }
 
         // Re-appending an undelivered persisted prefix would duplicate it on the next run.
-        private bool ApplyPersistenceResult(TelemetryEvent[] events, int persistedCount, int deliveredLeadingCount)
+        private bool ApplyPersistenceResult(TelemetryEvent[] events, int persistedCount, int deliveredLeadingCount,
+            out TelemetryEvent[] unpersisted)
         {
+            unpersisted = null;
             if (!_offlineQueueActive) return true;
             int ackCount = Math.Min(persistedCount, deliveredLeadingCount);
             bool persistenceOk = ackCount == 0 || !_persistenceAcknowledgementFailed;
+            int persistStart = Math.Max(deliveredLeadingCount, persistedCount);
+            TelemetryEvent[] fresh = persistStart < events.Length ? UndeliveredTail(events, persistStart) : null;
             try
             {
                 // A later positional ack cannot skip an earlier prefix that failed removal.
@@ -115,28 +119,18 @@ namespace Framedash
                     Debug.LogWarning("[Framedash] Offline queue acknowledgement failed; positional acknowledgements are paused until reinitialization. Delivered events may replay.");
                 }
 
-                int persistStart = Math.Max(deliveredLeadingCount, persistedCount);
-                if (persistStart < events.Length)
+                if (fresh != null && !_persistence.Append(fresh))
                 {
-                    var toPersist = new TelemetryEvent[events.Length - persistStart];
-                    Array.Copy(events, persistStart, toPersist, 0, toPersist.Length);
-                    if (!_persistence.Append(toPersist))
-                    {
-                        persistenceOk = false;
-                        // Disk write failed (full / permissions): the tail was already
-                        // dequeued, so re-enqueue it to the in-memory buffer to retry on a
-                        // later flush rather than dropping it. These events are fresh (not
-                        // on disk), so they go to the tail and do not affect the persisted
-                        // leading block. The ring still bounds memory if the disk stays bad.
-                        Debug.LogWarning($"[Framedash] Offline queue write failed; keeping {toPersist.Length} event(s) in memory for retry.");
-                        foreach (var evt in toPersist) _buffer.Enqueue(evt);
-                    }
+                    persistenceOk = false;
+                    unpersisted = fresh;
+                    Debug.LogWarning($"[Framedash] Offline queue write failed; retaining {fresh.Length} event(s) outside the producer ring for retry.");
                 }
                 return persistenceOk;
             }
             catch (Exception e)
             {
                 if (ackCount > 0) _persistenceAcknowledgementFailed = true;
+                unpersisted = fresh;
                 Debug.LogError($"[Framedash] Offline queue update failed: {e}");
                 return false;
             }
@@ -227,17 +221,7 @@ namespace Framedash
         }
 
 #if !UNITY_WEBGL
-        // Deliver the at-call-time events synchronously within the shared budget, then
-        // reconcile the offline-queue persisted prefix. The reclaimed in-flight batch and
-        // the freshly-buffered events are sent as SEPARATE envelopes -- NEVER concatenated:
-        // the consumer dedups by hashing the full ordered event array, so re-sending the
-        // in-flight batch with its ORIGINAL array keeps the same dedup token (dropped if it
-        // already reached ingest), whereas an "in-flight + buffered" array would hash
-        // differently and double-insert/charge every in-flight event. Buffered goes FIRST
-        // (guaranteed-undelivered) so a wedged endpoint under the shared budget cannot
-        // starve it behind a possibly-redundant in-flight resend. Returns true only when
-        // EVERY envelope was fully delivered; undelivered events are never lost (persisted
-        // with the offline queue on, re-buffered with it off).
+        // Merging envelopes changes the consumer's hash and can duplicate an uncertain send.
         private bool DrainBlocking(TelemetryEvent[] inFlight, int inFlightPersisted,
             System.Diagnostics.Stopwatch elapsed, int budgetMs)
         {
@@ -280,9 +264,6 @@ namespace Framedash
                 return remaining <= 0 ? 0 : sender.Post(payload, remaining);
             };
 
-            // Phase 1 -- SEND every envelope in BuildBlockingEnvelopes order (buffered FIRST,
-            // so the guaranteed-undelivered buffered events get budget priority over a
-            // possibly-redundant in-flight resend). Persistence is DEFERRED to phase 2.
             int deliveredBuffered = 0;
             int deliveredInFlight = 0;
             // Strict budget contract: a 2xx confirmed at/after the deadline still ACKS its
@@ -292,11 +273,8 @@ namespace Framedash
             bool withinBudget = true;
             foreach (TelemetryEvent[] envelope in envelopes)
             {
-                // The reclaimed in-flight envelope keeps its identical array shape (its size
-                // was already accepted by the parked async send, so the pre-serialize
-                // size-split is disabled) to preserve the consumer's per-POST dedup token;
-                // the freshly-buffered envelope has no async owner and IS pre-split so no
-                // single serialize+gzip overruns the budget.
+                // Preserve an async envelope's accepted shape for deduplication; blocking
+                // snapshots use deterministic splits to bound serialization work.
                 bool isInFlight = ReferenceEquals(envelope, inFlight);
                 int delivered = BlockingFlush.SendLeading(
                     envelope, _maxPayloadBytes, clock, budgetMs, post,
@@ -305,28 +283,14 @@ namespace Framedash
                 if (isInFlight) deliveredInFlight = delivered; else deliveredBuffered = delivered;
             }
 
-            // Phase 2 -- RECONCILE the IN-FLIGHT envelope FIRST. Its ApplyPersistenceResult is
-            // the only one that positionally ACKs (DropOldest) the persisted-queue head (the
-            // restored prefix). The buffered envelope never carries a persisted prefix while an
-            // in-flight batch exists (bufferedPersisted == 0), so it only ever APPENDS its
-            // undelivered tail -- and an Append can EVICT the queue head once MaxPersistedEvents
-            // is exceeded. Acking first, on the UNSHIFTED queue, keeps the positional-ack
-            // invariant (#1317) in every {in-flight}x{buffered} success/fail interleaving:
-            // otherwise a buffered failure-append could shift the head so the in-flight ack
-            // deletes the just-appended undelivered events instead of the delivered prefix.
+            // Reconcile the older prefix before appending: a bounded append can evict the
+            // disk head and make a later positional acknowledgement delete the wrong events.
             bool allDelivered = true;
             if (inFlight != null && inFlight.Length > 0)
             {
-                if (!_offlineQueueActive && deliveredInFlight < inFlight.Length)
-                {
-                    // Both envelopes can fill the ring; retain the reclaimed envelope separately.
-                    _inFlightBatch = UndeliveredTail(inFlight, deliveredInFlight);
-                    _inFlightPersistedCount = 0;
-                    _flushRequested = true;
+                if (!ReconcileBlockingDelivery(inFlight, inFlightPersisted, deliveredInFlight, out _inFlightBatch))
                     allDelivered = false;
-                }
-                else if (!ReconcileBlockingEnvelope(inFlight, inFlightPersisted, deliveredInFlight))
-                    allDelivered = false;
+                _inFlightPersistedCount = 0;
             }
             if (buffered.Length > 0
                 && !ReconcileBlockingEnvelope(buffered, bufferedPersisted, deliveredBuffered))
@@ -349,19 +313,26 @@ namespace Framedash
         // Merging envelopes would change the consumer's dedup token.
         private bool ReconcileBlockingEnvelope(TelemetryEvent[] events, int persistedCount, int delivered)
         {
+            return ReconcileBlockingDelivery(events, persistedCount, delivered, out _retainedBlockingBatch);
+        }
+
+        private bool ReconcileBlockingDelivery(TelemetryEvent[] events, int persistedCount, int delivered,
+            out TelemetryEvent[] retained)
+        {
+            retained = null;
             if (events == null || events.Length == 0) return true;
+            bool persisted = true;
             if (_offlineQueueActive)
             {
-                bool persisted = ApplyPersistenceResult(events, persistedCount, delivered);
-                return delivered == events.Length && persisted;
+                persisted = ApplyPersistenceResult(events, persistedCount, delivered, out retained);
             }
             else if (delivered < events.Length)
             {
                 // Producers can refill the ring while the snapshot is being sent.
-                _retainedBlockingBatch = UndeliveredTail(events, delivered);
-                _flushRequested = true;
+                retained = UndeliveredTail(events, delivered);
             }
-            return delivered == events.Length;
+            if (retained != null) _flushRequested = true;
+            return delivered == events.Length && persisted;
         }
 #endif
 
@@ -385,8 +356,7 @@ namespace Framedash
                     EndPerformanceRun(completed: false);
                     // A normal send's finalizer must retain its tail when stopped during shutdown.
                     _initialized = false;
-                    // The finalizer owns persistence or recovery; clearing its retained tail
-                    // would drop a failed blocking batch before the last best-effort send.
+                    // Stopping a send must not clear its tail before final reconciliation.
                     if (_inFlightFlush != null)
                     {
                         StopCoroutine(_inFlightFlush);
@@ -394,13 +364,15 @@ namespace Framedash
                         // Unity may leave yielded transport iterators alive after stopping the owner.
                         _transport.AbortInFlightRequest();
                     }
+                    _flushGeneration++;
                     if (_offlineQueueActive)
                     {
-                        // Persist whatever is still buffered instead of a best-effort network
-                        // flush: a synchronous disk write completes before the app exits, and
-                        // the offline queue resends next run. An in-flight periodic flush at
-                        // this instant is not captured -- the same best-effort limitation that
-                        // applies to any in-flight send on a hard exit.
+                        // Stopped iterators may not finalize; reconcile any remaining owned envelope.
+                        if (_inFlightBatch != null)
+                            ApplyPersistenceResult(_inFlightBatch, _inFlightPersistedCount, 0, out _inFlightBatch);
+                        _inFlightPersistedCount = 0;
+                        if (_retainedBlockingBatch != null)
+                            ApplyPersistenceResult(_retainedBlockingBatch, 0, 0, out _retainedBlockingBatch);
                         TelemetryEvent[] remaining = _buffer.DequeueAll();
                         // Skip the leading block already on disk (restored this run and not yet
                         // flushed); appending it would double-persist those events and resend
