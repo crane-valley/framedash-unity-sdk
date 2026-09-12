@@ -21,6 +21,8 @@ pause later positional acknowledgements until reinitialization. Tracking APIs
 expose nullable metadata for optional references and non-null event names.
 Fresh fully delivered events remain successful when no disk acknowledgement is
 needed. A completed recovered send re-arms delivery of the untouched producer ring.
+Blocking flush uses the initialized transport endpoint, so later configuration
+edits cannot combine a new destination with the current session's credential.
 Initialization parameters and the optional session ID carry nullable metadata;
 the `Initialize` return value remains non-null.
 

@@ -158,10 +158,9 @@ namespace Framedash
 
                 if (!_initialized) return false;
 
-                // Fail closed: an endpoint that failed the transport-security check never
-                // sends. Re-checked here (not via the transport) so the guarantee holds
-                // regardless of transport state; events stay buffered (no loss).
-                if (!EndpointSecurity.IsEndpointTransportSecure(_endpointUrl)) return false;
+                // Configuration can change while initialized; this endpoint belongs to
+                // the active credential, unlike the pending configured URL.
+                if (!EndpointSecurity.IsEndpointTransportSecure(_transport.EndpointUrl)) return false;
 
 #if UNITY_WEBGL
                 // WebGL has no sockets and cannot block its single thread; the async path
@@ -265,7 +264,7 @@ namespace Framedash
             TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(buffered, inFlight);
             if (envelopes.Length == 0) return true;
 
-            var sender = new BlockingHttpSender(_endpointUrl, _effectiveApiKey, SdkVersion, _transport.BlockingDnsResolver);
+            var sender = new BlockingHttpSender(_transport.EndpointUrl, _effectiveApiKey, SdkVersion, _transport.BlockingDnsResolver);
             Func<long> clock = () => elapsed.ElapsedMilliseconds;
             BlockingFlush.BlockingPost post = payload =>
             {

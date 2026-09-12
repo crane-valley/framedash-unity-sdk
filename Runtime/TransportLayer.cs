@@ -46,6 +46,7 @@ namespace Framedash
         }
 
         private readonly string _endpointUrl;
+        internal string EndpointUrl => _endpointUrl;
         private readonly string _apiKey;
         private readonly string _sdkVersion;
         private readonly int _maxPayloadBytes;
