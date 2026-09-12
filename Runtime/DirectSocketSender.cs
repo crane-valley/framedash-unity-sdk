@@ -39,15 +39,13 @@ namespace Framedash
     /// RemoteCertificateValidationCallback here -- the default validation IS the
     /// design.
     ///
-    /// Engine-independent by construction (BCL only), but excluded from the NUnit
+    /// Engine-independent by construction (BCL only), but excluded from the NextUnit
     /// test assembly like TransportLayer because exercising it requires a live TLS
     /// endpoint; the testable pieces live in EndpointAddressPlanner and
     /// RawHttpMessage.
     /// </summary>
     internal static class DirectSocketSender
     {
-        // Response head is tiny (status line + a few headers); 1 KiB is ample to
-        // capture the status line, which is all the retry classification needs.
         private const int StatusReadBufferBytes = 1024;
 
         /// <summary>
@@ -89,7 +87,6 @@ namespace Framedash
             TcpClient? client = null;
             try
             {
-                // Abandoned before the task even ran: never open a connection.
                 if (cancellationToken.IsCancellationRequested) return 0;
 
                 var uri = new Uri(ipLiteralUrl);
@@ -106,8 +103,6 @@ namespace Framedash
                     {
                         client.Connect(address, uri.Port);
 
-                        // Default validation callback + default protocols (OS choice):
-                        // full chain/expiry/hostname validation against commonName.
                         using (var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false))
                         {
                             ssl.AuthenticateAsClient(commonName);
@@ -164,7 +159,7 @@ namespace Framedash
         private static void SafeClose(TcpClient? client)
         {
             try { client?.Close(); }
-            catch { /* best-effort teardown */ }
+            catch {   }
         }
     }
 }

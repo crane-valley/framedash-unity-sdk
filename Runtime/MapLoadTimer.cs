@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 
 namespace Framedash
@@ -8,10 +10,9 @@ namespace Framedash
     /// measurement (loaded map name + a monotonic start timestamp in seconds) and
     /// computes the elapsed load time in milliseconds. The SDK reads its monotonic
     /// wall clock (System.Diagnostics.Stopwatch) and feeds the seconds in, so the
-    /// timing math is unit-testable without an engine -- no UnityEngine references,
-    /// NUnit-tested. Thread-safe (a lock guards the pending pair) so a Begin/End that
-    /// straddles a threaded loader observes a coherent state, matching the SDK's
-    /// thread-safe public-API convention.
+    /// timing math is unit-testable without an engine. Thread-safe (a lock guards the
+    /// pending pair) so a Begin/End that straddles a threaded loader observes a coherent
+    /// state, matching the SDK's thread-safe public-API convention.
     ///
     /// The load time rides the existing metrics map (proto field 13) as
     /// <see cref="KeyLoadTimeMs"/> on the auto event <see cref="MapLoadEventName"/>,
@@ -26,7 +27,6 @@ namespace Framedash
     /// </summary>
     public sealed class MapLoadTimer
     {
-        /// <summary>Auto event name emitted for a completed map/level load.</summary>
         public const string MapLoadEventName = "map_load";
 
         /// <summary>
@@ -35,7 +35,6 @@ namespace Framedash
         /// </summary>
         public const string KeyMapName = "map_name";
 
-        /// <summary>Metrics-map key carrying the measured load time in milliseconds.</summary>
         public const string KeyLoadTimeMs = "load_time_ms";
 
         private readonly object _lock = new object();
@@ -43,13 +42,7 @@ namespace Framedash
         private double _startSeconds;
         private bool _pending;
 
-        /// <summary>
-        /// Begin (or replace) a pending measurement. Calling Begin again before
-        /// <see cref="End"/> REPLACES the pending measurement -- the earlier start is
-        /// discarded and only the most recent Begin/End pair is reported. A null map
-        /// name is stored as empty.
-        /// </summary>
-        public void Begin(string mapName, double startSeconds)
+        public void Begin(string? mapName, double startSeconds)
         {
             lock (_lock)
             {
@@ -84,16 +77,14 @@ namespace Framedash
             }
         }
 
-        /// <summary>True while a Begin is awaiting its End.</summary>
         public bool HasPending
         {
             get { lock (_lock) return _pending; }
         }
 
         /// <summary>
-        /// Validate a directly-reported load time (ReportMapLoad). A NaN, Infinity, or
-        /// negative value is rejected so the whole call is DROPPED (not clamped),
-        /// matching the drop-don't-clamp rule the other manual metric feeds use.
+        /// A NaN, Infinity, or negative value is rejected so the whole call is DROPPED (not
+        /// clamped), matching the drop-don't-clamp rule the other manual metric feeds use.
         /// </summary>
         public static bool IsValidLoadTimeMs(double loadTimeMs)
         {

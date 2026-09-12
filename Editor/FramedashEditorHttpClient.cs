@@ -29,24 +29,14 @@ namespace Framedash.Editor
             string url = baseUrl + "/api/v1/projects/" + Uri.EscapeDataString(projectId) + "/maps";
             StartGet(url, apiKey, (connected, statusCode, body, requestError) =>
             {
-                if (!connected)
+                if (!FramedashEditorLogic.ValidateHttpResponse(
+                    connected,
+                    statusCode,
+                    body,
+                    requestError,
+                    out string responseError))
                 {
-                    InvokeSafely(
-                        onComplete,
-                        false,
-                        null,
-                        string.IsNullOrEmpty(requestError)
-                            ? "Unable to reach the Framedash API."
-                            : requestError);
-                    return;
-                }
-                if (statusCode < 200 || statusCode > 299)
-                {
-                    InvokeSafely(
-                        onComplete,
-                        false,
-                        null,
-                        FramedashEditorLogic.ParseProblemMessage(body, HttpFallback(statusCode)));
+                    InvokeSafely(onComplete, false, null, responseError);
                     return;
                 }
                 if (!FramedashEditorLogic.ParseMapsResponse(body, out var maps, out string parseError))
@@ -98,24 +88,14 @@ namespace Framedash.Editor
 
             StartGet(url, apiKey, (connected, statusCode, body, requestError) =>
             {
-                if (!connected)
+                if (!FramedashEditorLogic.ValidateHttpResponse(
+                    connected,
+                    statusCode,
+                    body,
+                    requestError,
+                    out string responseError))
                 {
-                    InvokeSafely(
-                        onComplete,
-                        false,
-                        null,
-                        string.IsNullOrEmpty(requestError)
-                            ? "Unable to reach the Framedash API."
-                            : requestError);
-                    return;
-                }
-                if (statusCode < 200 || statusCode > 299)
-                {
-                    InvokeSafely(
-                        onComplete,
-                        false,
-                        null,
-                        FramedashEditorLogic.ParseProblemMessage(body, HttpFallback(statusCode)));
+                    InvokeSafely(onComplete, false, null, responseError);
                     return;
                 }
                 if (!FramedashEditorLogic.ParseHeatmapResponse(body, out var cells, out string parseError))
@@ -327,13 +307,6 @@ namespace Framedash.Editor
                     "",
                     "Unable to reach the Framedash API.");
             }
-        }
-
-        private static string HttpFallback(long statusCode)
-        {
-            return statusCode > 0
-                ? "Framedash request failed (HTTP " + statusCode + ")."
-                : "Framedash request failed.";
         }
 
         private static void InvokeSafely<T>(

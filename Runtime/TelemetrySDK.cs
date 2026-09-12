@@ -1,33 +1,26 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
 using UnityEngine;
 
 namespace Framedash
 {
-    /// <summary>
-    /// Main entry point for the Framedash Telemetry SDK.
-    /// Attach to a persistent GameObject or use <see cref="Initialize"/>.
-    /// </summary>
-    public sealed class TelemetrySDK : MonoBehaviour
+    public sealed partial class TelemetrySDK : MonoBehaviour
     {
         private static TelemetrySDK s_instance;
         private const int DefaultMaxBatchSize = 100;
-        // Matches the consumer's MAX_EVENTS_PER_BATCH (packages/ingest-core/src/proto-decode.ts):
+        // Matches the consumer's MAX_EVENTS_PER_BATCH (packages/ingest-core/src/config.ts):
         // a batch larger than the server cap is rejected wholesale, so allowing the
         // Inspector to configure one only loses data. 10,000 also equals the default
         // EventBuffer capacity; real flushes stay in the low hundreds (~100KB payload trigger).
         private const int MaxInspectorBatchSize = 10000;
         private const int MaxInspectorEventBufferCapacity = MaxInspectorBatchSize * 2;
-        // event_name truncation is centralized in FieldClamp.TruncateEventName
-        // (surrogate-pair safe); see FieldClamp.MaxEventNameLength.
 
         // Code constant, deliberately NOT serialized: a [SerializeField] version
         // would be captured into scenes/prefabs and deserialize the OLD value over
         // this initializer after a package upgrade, leaving X-SDK-Version stale.
         // Keep in sync with sdks/unity/package.json (release gotcha).
-        private const string SdkVersion = "0.1.7";
+        private const string SdkVersion = "0.1.8";
 
         [Header("Configuration")]
         [SerializeField] private string _endpointUrl = "https://ingest.framedash.dev/v1/events";
@@ -44,7 +37,7 @@ namespace Framedash
         [Range(1, MaxInspectorEventBufferCapacity)]
         private int _eventBufferCapacity = EventBuffer.DefaultCapacity;
         [SerializeField] private float _flushIntervalSeconds = 30f;
-        [SerializeField] private int _maxPayloadBytes = 102400; // 100KB
+        [SerializeField] private int _maxPayloadBytes = 102400;
 
         [Header("Sampling")]
         [SerializeField] [Range(0f, 1f)] private float _samplingRate = 1f;
@@ -71,7 +64,7 @@ namespace Framedash
         private Coroutine _flushCoroutine;
         private bool _initialized;
         private int _estimatedPayloadBytes;
-        private int _isFlushing; // 0 = idle, 1 = flushing (atomic via Interlocked)
+        private int _isFlushing;
         // Incremented on each (re)initialization; a FlushCoroutine only releases
         // _isFlushing if its captured generation still matches, so a stale flush from a
         // prior session cannot clear the guard for a new session's in-flight flush.
@@ -85,9 +78,8 @@ namespace Framedash
         // so the configured _buildId is never overwritten and the stamping path reads the
         // build_id and the tags from a single consistent point.
         private IPersistenceProvider _persistence;
-        // True when the offline queue is active (a FilePersistence is in use). Captured
-        // from _enableOfflineQueue at init so a later inspector toggle cannot desync the
-        // live provider mid-session.
+        // Captured from _enableOfflineQueue at init so a later inspector toggle cannot desync
+        // the live provider mid-session.
         private bool _offlineQueueActive;
         // Number of leading buffered events already on disk (restored from a prior run,
         // or a previous flush's persisted block). The first N events the buffer dequeues
@@ -104,6 +96,22 @@ namespace Framedash
         // that coroutine and let its (generation-gated) finally persist the undelivered
         // events instead of losing them on quit.
         private Coroutine _inFlightFlush;
+        // The batch + persisted-prefix count that in-flight FlushCoroutine is sending,
+        // captured alongside _inFlightFlush so FlushBlocking can reclaim and synchronously
+        // deliver them: the blocked main thread cannot let that coroutine advance, so its
+        // already-dequeued events would otherwise be stranded. Main-thread only.
+        private TelemetryEvent[] _inFlightBatch;
+        private int _inFlightPersistedCount;
+        // Captured on the main thread at Awake so FlushBlocking can reject an
+        // off-main-thread call: it must never marshal-and-block, which would deadlock
+        // against the very main loop the caller waits on. Volatile -- written on the main
+        // thread, read from any thread.
+        private volatile int _mainThreadId = -1;
+        // The resolved (effective) API key the transport sends with -- the configured key,
+        // or the FRAMEDASH_API_KEY fallback. Retained so the synchronous FlushBlocking path
+        // uses the SAME credential as the async transport (which stores it privately). Never
+        // promoted into _apiKey (see InitializeInternal).
+        private string _effectiveApiKey;
         // Camera yaw/pitch sampled once per frame (Update) and stamped onto events,
         // mirroring the per-frame performance cache. Packed into one long and
         // published/read atomically so the (yaw, pitch) pair is always observed
@@ -111,10 +119,6 @@ namespace Framedash
         private long _cameraSnapshot = CameraMath.CameraAbsent;
         private const float HeartbeatIntervalSeconds = 10f;
         private float _timeSinceLastHeartbeat;
-        // Disk I/O window accumulator (manual feed + automatic engine source) and the
-        // optional automatic source. Drained on each perf_heartbeat into the io.* keys
-        // of the metrics map. _ioSource is null in release players / when the engine
-        // metrics API is unavailable; the manual feed (ReportIoSample) still works.
         private IoStats _ioStats;
         private IIoMetricsSource _ioSource;
         // Memory readings (mem.vram, mem.heap): sampled fresh only on perf_heartbeat --
@@ -135,7 +139,6 @@ namespace Framedash
         // so a new session never completes a load begun by a prior one.
         private MapLoadTimer _mapLoadTimer;
 
-        /// <summary>Current session ID, or null if SDK is not initialized.</summary>
         public string SessionId
         {
             get
@@ -149,15 +152,12 @@ namespace Framedash
             }
         }
 
-        /// <summary>Whether the SDK is initialized and ready to track events.</summary>
         public bool IsInitialized => _initialized;
 
         /// <summary>
-        /// Whether the SDK records the main camera's yaw/pitch on each event
-        /// (default true). Settable from code so projects that initialize via
-        /// <see cref="Initialize"/> can opt out without an inspector-attached
-        /// component, e.g. <c>TelemetrySDK.Instance.CaptureCameraRotation = false;</c>.
-        /// Takes effect from the next frame's capture.
+        /// Settable from code so projects that initialize via `Initialize` can opt out without
+        /// an inspector-attached component, e.g. `TelemetrySDK.Instance.CaptureCameraRotation =
+        /// false;`. Takes effect from the next frame's capture.
         /// </summary>
         public bool CaptureCameraRotation
         {
@@ -194,7 +194,6 @@ namespace Framedash
             }
         }
 
-        /// <summary>Singleton instance. Created automatically if needed.</summary>
         public static TelemetrySDK Instance
         {
             get
@@ -218,26 +217,19 @@ namespace Framedash
         }
 
         /// <summary>
-        /// Initialize the SDK with the given configuration.
-        /// Call this once at game startup (e.g., in a boot scene). All parameters are
-        /// optional: a CI build can call the no-argument <c>TelemetrySDK.Initialize()</c>
-        /// to authenticate purely from the <c>FRAMEDASH_API_KEY</c> environment variable.
+        /// The Framedash ingest API key. Precedence: an explicit non-empty argument wins, else
+        /// a key configured in the Inspector, else the `FRAMEDASH_API_KEY` environment variable
+        /// (the CI path, consistent with the Framedash CLI). Passing null or empty keeps the
+        /// Inspector-configured key (if any) rather than clearing it, so calling
+        /// `Initialize(null, ...)` only to set other options does not override an Inspector key
+        /// with the environment. Initialization fails with a logged error only when no source
+        /// supplies a key.
+        ///
+        /// When true (default), unsent events are persisted to disk and retried next run. Pass
+        /// false for a pure in-memory buffer with no disk writes -- the only way a code-only
+        /// integration (which auto-creates the component) can opt out, since the inspector
+        /// field is never seen.
         /// </summary>
-        /// <param name="apiKey">
-        /// The Framedash ingest API key. Precedence: an explicit non-empty argument wins,
-        /// else a key configured in the Inspector, else the <c>FRAMEDASH_API_KEY</c>
-        /// environment variable (the CI path, consistent with the Framedash CLI). Passing
-        /// null or empty keeps the Inspector-configured key (if any) rather than clearing
-        /// it, so calling <c>Initialize(null, ...)</c> only to set other options does not
-        /// override an Inspector key with the environment. Initialization fails with a
-        /// logged error only when no source supplies a key.
-        /// </param>
-        /// <param name="enableOfflineQueue">
-        /// When true (default), unsent events are persisted to disk and retried next run.
-        /// Pass false for a pure in-memory buffer with no disk writes -- the only way a
-        /// code-only integration (which auto-creates the component) can opt out, since the
-        /// inspector field is never seen.
-        /// </param>
         public static TelemetrySDK Initialize(string apiKey = null, string endpointUrl = null, string buildId = null, string playerId = null, bool enableOfflineQueue = true)
         {
             var sdk = Instance;
@@ -257,6 +249,9 @@ namespace Framedash
 
         private void Awake()
         {
+            // Awake always runs on Unity's main thread; record it so FlushBlocking can
+            // reject an off-main-thread call rather than marshaling-and-blocking.
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
             if (s_instance != null && s_instance != this)
             {
                 Destroy(gameObject);
@@ -281,13 +276,6 @@ namespace Framedash
             }
         }
 
-        /// <summary>
-        /// Resolve the effective API key for initialization. An explicitly configured key
-        /// (Inspector field or <see cref="Initialize"/> argument) always wins; when none
-        /// is configured the <c>FRAMEDASH_API_KEY</c> environment variable is used as a CI
-        /// fallback. Precedence and naming match the Framedash CLI's <c>--api-key</c> vs
-        /// <c>FRAMEDASH_API_KEY</c> contract. Returns empty/null when neither is set.
-        /// </summary>
         private string ResolveApiKey()
             => ApiKeyResolver.Resolve(_apiKey, () => Environment.GetEnvironmentVariable("FRAMEDASH_API_KEY"));
 
@@ -306,6 +294,7 @@ namespace Framedash
             // mirroring Godot's _Process-wide try/catch.
             try
             {
+                UpdatePerformanceRun();
                 _perfCollector.UpdateFrameTimings();
                 if (_captureCameraRotation) UpdateCameraRotation();
                 _timeSinceLastHeartbeat += Time.unscaledDeltaTime;
@@ -350,7 +339,6 @@ namespace Framedash
                 float yaw = CameraMath.NormalizeYaw(euler.y);
                 float pitch = CameraMath.PitchFromEulerX(euler.x);
 
-                // Finite-only: publish the coherent pair, or the absent sentinel.
                 if (float.IsNaN(yaw) || float.IsInfinity(yaw) ||
                     float.IsNaN(pitch) || float.IsInfinity(pitch))
                 {
@@ -389,7 +377,6 @@ namespace Framedash
                 return;
             }
 
-            // Validate endpoint URL
             if (!Uri.TryCreate(_endpointUrl, UriKind.Absolute, out var parsedUri) ||
                 (parsedUri.Scheme != Uri.UriSchemeHttp && parsedUri.Scheme != Uri.UriSchemeHttps))
             {
@@ -452,6 +439,9 @@ namespace Framedash
             // means restore itself never drops, so this captures a clean starting point.
             _persistedDropBaseline = _buffer.DroppedCount;
 
+            // Retain the effective key so the synchronous FlushBlocking path sends with
+            // the same credential as the async transport.
+            _effectiveApiKey = effectiveApiKey;
             _transport = new TransportLayer(_endpointUrl, effectiveApiKey, SdkVersion, _maxPayloadBytes, _verboseLogging);
             _session = new SessionManager(_playerId);
             _perfCollector = new PerformanceCollector();
@@ -460,17 +450,10 @@ namespace Framedash
             Interlocked.Exchange(ref _cameraSnapshot, CameraMath.CameraAbsent);
             _samplingPolicy = new SamplingPolicy(_samplingRate);
             _flushPolicy = new FlushPolicy(maxBatchSize, _maxPayloadBytes, _flushIntervalSeconds);
-            // Truncate to the ingest caps for parity with the other string fields
-            // (these are always short in practice, but clamp defensively).
             _cachedPlatform = FieldClamp.Truncate(Application.platform.ToString(), FieldClamp.MaxPlatformLength);
             _cachedEngineVersion = FieldClamp.Truncate(Application.unityVersion, FieldClamp.MaxEngineVersionLength);
 
             _timeSinceLastHeartbeat = 0f;
-            // Disk I/O: a fresh accumulator per session, plus the automatic engine
-            // source when available (development build / Editor + ENABLE_PROFILER).
-            // TryCreate calls StartCollectingMetrics under the hood and returns null
-            // (never throws) if the API is unavailable, in which case only the manual
-            // ReportIoSample feed contributes.
             _ioStats = new IoStats();
             _ioSource = AsyncReadManagerIoSource.TryCreate();
             // Eager first sample at init (rather than a lazy sample on the first
@@ -537,732 +520,5 @@ namespace Framedash
             return capacity;
         }
 
-        /// <summary>
-        /// Track a custom event.
-        /// </summary>
-        /// <param name="eventName">Name of the event (e.g. "player_death", "zone_enter"). Must not be null or empty.</param>
-        /// <param name="mapId">Optional map identifier for spatial context.</param>
-        /// <param name="position">Optional world-space position where the event occurred.</param>
-        /// <param name="attributes">Optional string key-value pairs for categorical data.</param>
-        /// <param name="metrics">Optional float key-value pairs for numerical measurements.</param>
-        public void Track(string eventName, string mapId = "",
-            Vector3? position = null, Dictionary<string, string> attributes = null,
-            Dictionary<string, float> metrics = null)
-        {
-            try
-            {
-                if (!_initialized)
-                {
-                    Debug.LogWarning("[Framedash] SDK not initialized. Call Initialize() first.");
-                    return;
-                }
-
-                if (string.IsNullOrWhiteSpace(eventName))
-                {
-                    Debug.LogWarning("[Framedash] eventName must not be null, empty, or whitespace. Event dropped.");
-                    return;
-                }
-
-                if (!_warnedEmptyPlayerId && string.IsNullOrEmpty(_session.PlayerId))
-                {
-                    _warnedEmptyPlayerId = true;
-                    Debug.LogWarning("[Framedash] No player_id set. Events will be sent as anonymous. Call SetPlayerId() to associate events with a player.");
-                }
-
-                // Normalize event name first so sampling and the wire-side event use the
-                // same key — overrides registered for long names must match the truncated
-                // form that actually leaves the SDK and that ingest validation accepts.
-                string safeEventName = FieldClamp.TruncateEventName(eventName);
-
-                // Sampling check — skip expensive perf collection if event is dropped
-                if (!_samplingPolicy.ShouldSample(safeEventName))
-                    return;
-
-                // Convert Dictionary parameters to serializable List types, enforcing the
-                // ingest-core caps client-side (count, key/value length, finite metrics) so a
-                // single oversized map cannot make the consumer drop the whole flush.
-                List<StringPair> attrList = FieldClamp.ClampAttributes(attributes);
-                List<FloatPair> metricList = FieldClamp.ClampMetrics(metrics);
-
-                string safeMapId = FieldClamp.Truncate(mapId ?? "", FieldClamp.MaxMapIdLength);
-
-                // Position-qualified events (non-empty map id) also carry the cached
-                // mem.* reading so the spatial heatmap grid query (map_id + cell bounds)
-                // sees real memory data -- perf_heartbeat alone has an empty map_id and
-                // never reaches that grid. Attaches from the cache only (refreshed at
-                // heartbeat cadence in TrackAutomated): no Profiler call on this per-event
-                // path. A caller-supplied metric of the same key name is never clobbered.
-                if (safeMapId.Length > 0)
-                {
-                    metricList = _memCache.AppendTo(metricList);
-                }
-
-                TrackInternal(
-                    safeEventName,
-                    safeMapId,
-                    FieldClamp.SanitizeCoord(position?.x ?? 0f),
-                    FieldClamp.SanitizeCoord(position?.y ?? 0f),
-                    FieldClamp.SanitizeCoord(position?.z ?? 0f),
-                    TelemetrySource.Player,
-                    attrList,
-                    metricList);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] Track() failed: {e}");
-            }
-        }
-
-        private void TrackAutomated(string eventName)
-        {
-            try
-            {
-                // Automated events (session_start, perf_heartbeat) bypass sampling,
-                // name validation, and player-ID checks — they are always valid and
-                // fired from internal SDK code after initialization succeeds.
-                //
-                // Disk I/O and memory are BUILT on the perf_heartbeat ONLY: drain the io
-                // window (folding in the automatic source delta) into the io.* metrics
-                // keys, refresh the memory cache with a fresh Profiler read, then append
-                // mem.* into the same list. Both stages omit their keys entirely when
-                // unavailable (absent = not collected), so an inert release build with
-                // no manual io feed and no mem support keeps metrics null. session_start
-                // carries no metrics. The refreshed _memCache is also what position-
-                // qualified Track() events attach (see Track()) until the next
-                // heartbeat -- so this is the only place mem.* is ever sampled.
-                List<FloatPair> metrics = null;
-                if (eventName == HeartbeatEventName)
-                {
-                    _memCache.Refresh(_memSource);
-                    metrics = _memCache.AppendTo(IoHeartbeat.BuildMetrics(_ioSource, _ioStats));
-                }
-                TrackInternal(
-                    eventName,
-                    mapId: "",
-                    posX: 0f, posY: 0f, posZ: 0f,
-                    source: TelemetrySource.Automated,
-                    attributes: null,
-                    metrics: metrics);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] TrackAutomated({eventName}) failed: {e}");
-            }
-        }
-
-        // Shared event-construction and enqueue/flush-check logic.
-        // All caller-specific gates (initialization check, name validation,
-        // sampling, player-ID warning, attribute conversion) run in the caller
-        // before this method is invoked with fully resolved values.
-        private void TrackInternal(
-            string eventName,
-            string mapId,
-            float posX, float posY, float posZ,
-            TelemetrySource source,
-            List<StringPair> attributes,
-            List<FloatPair> metrics)
-        {
-            var perf = _perfCollector.Collect();
-
-            // Read the camera snapshot atomically; TryUnpackCamera yields a coherent
-            // pair or nothing (both-or-neither). The serializer is the final guard.
-            float? camYaw = null;
-            float? camPitch = null;
-            if (_captureCameraRotation
-                && CameraMath.TryUnpackCamera(
-                    Interlocked.Read(ref _cameraSnapshot), out float unpackedYaw, out float unpackedPitch))
-            {
-                camYaw = unpackedYaw;
-                camPitch = unpackedPitch;
-            }
-
-            // Resolve the CI session against this event from a SINGLE snapshot read, so the
-            // stamped build_id and the merged ci.* attributes are always mutually consistent
-            // even if Begin/EndAutomatedSession runs on the main thread while this Track()
-            // executes on a background thread.
-            var ciStamp = _session.ResolveSessionStamp(_buildId, attributes);
-
-            var evt = new TelemetryEvent
-            {
-                EventName = eventName,
-                // Unix epoch in .NET ticks (621355968000000000L), divided by 10
-                // to convert 100ns ticks to microseconds for true microsecond precision.
-                TimestampUs = (DateTimeOffset.UtcNow.Ticks - 621355968000000000L) / 10L,
-                SessionId = _session.SessionId,
-                PlayerId = _session.PlayerId,
-                PositionX = posX,
-                PositionY = posY,
-                PositionZ = posZ,
-                MapId = mapId,
-                Fps = perf.Fps,
-                FrameTimeMs = perf.FrameTimeMs,
-                MemoryUsedBytes = perf.MemoryUsedBytes,
-                GpuTimeMs = perf.GpuTimeMs,
-                Source = source,
-                // The automated-session build_id override (CI) when active, else the
-                // configured build_id -- resolved above. _buildId is never overwritten, so a
-                // re-init or a direct build_id change can never strand a candidate id.
-                BuildId = FieldClamp.Truncate(ciStamp.BuildId ?? "", FieldClamp.MaxBuildIdLength),
-                Platform = _cachedPlatform,
-                EngineVersion = _cachedEngineVersion,
-                // The active automated-session attributes (CI metadata) merged with the
-                // per-event ones -- from the same snapshot as BuildId -- so every event,
-                // including the perf_heartbeat that feeds perf-diff, is tagged. No session
-                // active -> the per-event list unchanged.
-                Attributes = ciStamp.Attributes,
-                Metrics = metrics,
-                GameThreadMs = perf.GameThreadMs,
-                RenderThreadMs = perf.RenderThreadMs,
-                CameraYaw = camYaw,
-                CameraPitch = camPitch,
-            };
-
-            bool preservePersistedPrefix = _offlineQueueActive
-                && Volatile.Read(ref _pendingPersistedEventsToAck) > 0;
-            if (preservePersistedPrefix && !_buffer.TryEnqueuePreservingOldest(evt))
-            {
-                // The on-disk queue is positional, so overwriting its in-memory head would
-                // make a later DropOldest acknowledge a different event. Let the main-thread
-                // flush make room instead of doing disk I/O on the caller's Track path.
-                _flushRequested = true;
-                return;
-            }
-
-            if (!preservePersistedPrefix)
-            {
-                _buffer.Enqueue(evt);
-            }
-
-            // Estimate payload size for flush threshold check.
-            // Flag a flush when batch size or payload threshold is reached.
-            // The actual flush is deferred to the main thread via FlushLoop
-            // because StartCoroutine must be called from the main thread.
-            var currentBytes = Interlocked.Add(
-                ref _estimatedPayloadBytes, _flushPolicy.BytesPerEventEstimate);
-            if (_flushPolicy.ShouldRequestFlush(_buffer.Count, currentBytes))
-            {
-                _flushRequested = true;
-            }
-        }
-
-        /// <summary>
-        /// Set the player ID at runtime (e.g. after login).
-        /// Pass null or empty to revert to anonymous.
-        /// </summary>
-        public void SetPlayerId(string playerId)
-        {
-            if (!_initialized)
-            {
-                Debug.LogWarning("[Framedash] SDK not initialized. Call Initialize() first.");
-                return;
-            }
-            _session.SetPlayerId(playerId);
-        }
-
-        /// <summary>
-        /// Manually report a disk I/O sample. Use this in RELEASE players (where the
-        /// automatic AsyncReadManagerMetrics source is compiled out) or for custom
-        /// loaders / a virtual file system that the engine metrics do not see. The
-        /// sample accumulates into the current heartbeat window and is emitted, summed
-        /// with any automatic-source data, as the io.read_bytes / io.read_time_ms /
-        /// io.read_ops keys on the next perf_heartbeat. Thread-safe; negative or
-        /// non-finite components are dropped. Never throws.
-        /// </summary>
-        /// <param name="bytes">Bytes read since the last report.</param>
-        /// <param name="readTimeMs">Time spent reading, in milliseconds.</param>
-        /// <param name="ops">Number of read operations completed.</param>
-        public void ReportIoSample(long bytes, float readTimeMs, int ops)
-        {
-            try
-            {
-                // Gate on _initialized (not just a non-null accumulator): after
-                // Shutdown() _ioStats stays non-null, and accumulating into a dead
-                // session would waste memory/CPU until the next init.
-                if (!_initialized) return;
-                // Snapshot the field once: a concurrent re-init could swap it.
-                var stats = _ioStats;
-                if (stats == null) return; // not initialized yet -> silently ignore
-                stats.Add(bytes, readTimeMs, ops);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] ReportIoSample() failed: {e}");
-            }
-        }
-
-        // Monotonic wall-clock seconds from a high-resolution timer. Unaffected by
-        // Time.timeScale or a paused game (unlike Time.time / Time.deltaTime), so a
-        // load measured across a pause or slow-motion is still real elapsed time.
-        private static double MonotonicSeconds()
-            => (double)System.Diagnostics.Stopwatch.GetTimestamp()
-                / System.Diagnostics.Stopwatch.Frequency;
-
-        /// <summary>
-        /// Begin timing a map/level load. Records <paramref name="mapName"/> and a
-        /// monotonic start timestamp; call <see cref="EndMapLoad"/> when loading
-        /// completes to emit a <c>map_load</c> event whose <c>map_id</c> is deliberately
-        /// EMPTY (keeping it out of the spatial heatmap grid and the activation gate); the
-        /// map name rides <c>attributes["map_name"]</c> and the elapsed time rides the
-        /// <c>metrics["load_time_ms"]</c> metric. The clock is
-        /// wall-time monotonic (time-scale / pause safe). Calling BeginMapLoad again
-        /// before EndMapLoad REPLACES the pending measurement (the earlier one is
-        /// discarded). Main-thread only (pairs with <see cref="EndMapLoad"/>, whose event
-        /// emission reads main-thread-only Unity APIs). Never throws. No-op if the SDK is
-        /// not initialized.
-        /// </summary>
-        public void BeginMapLoad(string mapName)
-        {
-            try
-            {
-                if (!_initialized) return;
-                _mapLoadTimer.Begin(mapName, MonotonicSeconds());
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] BeginMapLoad() failed: {e}");
-            }
-        }
-
-        /// <summary>
-        /// Complete the map/level load started by <see cref="BeginMapLoad"/> and emit a
-        /// <c>map_load</c> event (map_id EMPTY; the stored map name in
-        /// <c>attributes["map_name"]</c>, elapsed milliseconds in
-        /// <c>metrics["load_time_ms"]</c>) via the normal Track path
-        /// (sampling, buffering, session attributes). No-op if no BeginMapLoad is pending
-        /// or the SDK is not initialized. Main-thread only: the emission goes through the
-        /// Track path, which reads main-thread-only Unity APIs (Time / Profiler); a call
-        /// from a worker thread (e.g. a custom loader completion) is swallowed fail-safe
-        /// but the event is lost. Never throws.
-        /// </summary>
-        public void EndMapLoad()
-        {
-            try
-            {
-                if (!_initialized) return;
-                if (!_mapLoadTimer.End(MonotonicSeconds(), out string mapName, out double elapsedMs))
-                    return;
-                TrackMapLoad(mapName, elapsedMs);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] EndMapLoad() failed: {e}");
-            }
-        }
-
-        /// <summary>
-        /// Directly report a map/level load time for developers who measure it themselves
-        /// (custom loaders / streaming), bypassing the Begin/End timer. Emits the same
-        /// <c>map_load</c> event shape (map_id EMPTY; <paramref name="mapName"/> in
-        /// <c>attributes["map_name"]</c>, <paramref name="loadTimeMs"/> in
-        /// <c>metrics["load_time_ms"]</c>). A NaN, Infinity, or
-        /// negative <paramref name="loadTimeMs"/> is DROPPED (the whole call, not clamped),
-        /// matching the manual metric-feed contract; the map name is clamped to the ingest
-        /// map_id cap. Main-thread only (same Track-path constraint as
-        /// <see cref="EndMapLoad"/>): dispatch back to the main thread after a
-        /// worker-thread load completes. Never throws. No-op if the SDK is not initialized.
-        /// </summary>
-        public void ReportMapLoad(string mapName, double loadTimeMs)
-        {
-            try
-            {
-                if (!_initialized) return;
-                if (!MapLoadTimer.IsValidLoadTimeMs(loadTimeMs)) return;
-                TrackMapLoad(mapName, loadTimeMs);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] ReportMapLoad() failed: {e}");
-            }
-        }
-
-        // Emit the map_load event through the public Track path so it inherits sampling,
-        // field/attribute clamping (finite-metric drop, attribute-value truncation),
-        // buffering, and CI session attributes -- it is a regular event, not a heartbeat.
-        // map_id is left EMPTY (like perf_heartbeat) so this non-spatial event never lands
-        // in the spatial heatmap grid query or the activation gate (both key on a non-empty
-        // map_id); the loaded map name rides attributes["map_name"] instead, clamped to the
-        // attribute-value cap by ClampAttributes. The load time rides metrics as
-        // load_time_ms (no proto/CH field). A finite double that overflows float range
-        // narrows to Infinity, which ClampMetrics would drop; skip it here so a map_load
-        // without its load_time_ms metric is never emitted.
-        private void TrackMapLoad(string mapName, double loadTimeMs)
-        {
-            float ms = (float)loadTimeMs;
-            if (float.IsInfinity(ms)) return;
-            var attributes = new Dictionary<string, string>(1) { { MapLoadTimer.KeyMapName, mapName ?? "" } };
-            var metrics = new Dictionary<string, float>(1) { { MapLoadTimer.KeyLoadTimeMs, ms } };
-            Track(MapLoadTimer.MapLoadEventName, mapId: "", attributes: attributes, metrics: metrics);
-        }
-
-        /// <summary>
-        /// Begin an automated profiling session: tag every subsequent event with CI
-        /// metadata so build-over-build performance can be compared in the dashboard and
-        /// via <c>framedash perf-diff</c>. <paramref name="buildId"/> is stamped as the
-        /// first-class build_id field; <paramref name="branch"/>, <paramref name="commit"/>
-        /// and <paramref name="scenario"/> are attached as the <c>ci.branch</c> /
-        /// <c>ci.commit</c> / <c>ci.scenario</c> attributes. Each call fully (re)defines the
-        /// session rather than patching it: an omitted (null/empty) buildId clears any prior
-        /// build_id override (events fall back to the configured build_id) and an omitted
-        /// branch/commit/scenario is absent from the new tag set -- callers cannot
-        /// incrementally update metadata across calls. With all arguments empty this is a
-        /// no-op. Call once after Initialize(), before the profiling run. No-op if the SDK is
-        /// not initialized.
-        /// </summary>
-        public void BeginAutomatedSession(string buildId = null, string branch = null,
-            string commit = null, string scenario = null)
-        {
-            try
-            {
-                if (!_initialized)
-                {
-                    Debug.LogWarning("[Framedash] SDK not initialized. Call Initialize() before BeginAutomatedSession().");
-                    return;
-                }
-                bool hasBuildId = !string.IsNullOrEmpty(buildId);
-                bool hasBranch = !string.IsNullOrEmpty(branch);
-                bool hasCommit = !string.IsNullOrEmpty(commit);
-                bool hasScenario = !string.IsNullOrEmpty(scenario);
-                // No metadata at all (e.g. BeginAutomatedSessionFromEnvironment with the
-                // FRAMEDASH_* vars unset) is a true no-op: do not start an override or touch
-                // session attributes, so a later End cannot clear state this call never set.
-                if (!hasBuildId && !hasBranch && !hasCommit && !hasScenario) return;
-                var attrs = new Dictionary<string, string>();
-                if (hasBranch) attrs["ci.branch"] = branch;
-                if (hasCommit) attrs["ci.commit"] = commit;
-                if (hasScenario) attrs["ci.scenario"] = scenario;
-                // Install the build_id override + ci.* attributes as one atomic snapshot. Each
-                // Begin fully (re)defines the session: a supplied buildId becomes the override,
-                // otherwise it is cleared back to the configured build_id fallback -- the same
-                // replace-don't-merge semantics as the attributes, so no stale build_id leaks
-                // from a prior session.
-                _session.SetAutomatedSession(hasBuildId ? buildId : null, attrs);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] BeginAutomatedSession() failed: {e}");
-            }
-        }
-
-        /// <summary>
-        /// Begin an automated profiling session from the standard Framedash CI environment
-        /// variables: <c>FRAMEDASH_BUILD_ID</c>, <c>FRAMEDASH_GIT_BRANCH</c>,
-        /// <c>FRAMEDASH_GIT_COMMIT</c>, <c>FRAMEDASH_TEST_SCENARIO</c>. The planned
-        /// <c>framedash run-profile-test</c> runner will export these before launching the
-        /// game, so a CI integration needs only this one call in its automated-test entry
-        /// point. With none of the variables set this is a no-op (no override is started).
-        /// No-op if the SDK is not initialized.
-        /// </summary>
-        public void BeginAutomatedSessionFromEnvironment()
-        {
-            try
-            {
-                BeginAutomatedSession(
-                    Environment.GetEnvironmentVariable("FRAMEDASH_BUILD_ID"),
-                    Environment.GetEnvironmentVariable("FRAMEDASH_GIT_BRANCH"),
-                    Environment.GetEnvironmentVariable("FRAMEDASH_GIT_COMMIT"),
-                    Environment.GetEnvironmentVariable("FRAMEDASH_TEST_SCENARIO"));
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] BeginAutomatedSessionFromEnvironment() failed: {e}");
-            }
-        }
-
-        /// <summary>
-        /// End the automated profiling session: clear the <c>ci.*</c> session attributes set
-        /// by <see cref="BeginAutomatedSession"/> AND drop the automated-session build_id
-        /// override, so events emitted afterward carry the configured build_id again and are
-        /// no longer folded into the candidate build's perf diff. Call <see cref="Flush"/>
-        /// first if you want the buffered tagged events sent before the tags are cleared.
-        /// No-op if the SDK is not initialized.
-        /// </summary>
-        public void EndAutomatedSession()
-        {
-            try
-            {
-                if (!_initialized) return;
-                // One atomic clear: the build_id override and the ci.* attributes live in a
-                // single session snapshot, so a background Track() either sees the whole
-                // session or none of it -- a post-End event can never carry the candidate
-                // build_id with cleared tags.
-                _session.ClearSessionAttributes();
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] EndAutomatedSession() failed: {e}");
-            }
-        }
-
-        /// <summary>
-        /// Set a per-event-name sampling rate that overrides the global rate for that event.
-        /// Empty event names are ignored. Rate is clamped to [0, 1].
-        /// Has no effect if the SDK is not initialized.
-        /// </summary>
-        public void SetEventSamplingRate(string eventName, float rate)
-        {
-            if (!_initialized)
-            {
-                Debug.LogWarning("[Framedash] SDK not initialized. Call Initialize() first.");
-                return;
-            }
-            _samplingPolicy.SetEventRate(FieldClamp.TruncateEventName(eventName), rate);
-        }
-
-        /// <summary>
-        /// Remove a per-event-name sampling override so the event falls back to the global rate.
-        /// Returns true if an override was present.
-        /// </summary>
-        public bool RemoveEventSamplingRate(string eventName)
-        {
-            if (!_initialized) return false;
-            return _samplingPolicy.RemoveEventRate(FieldClamp.TruncateEventName(eventName));
-        }
-
-        /// <summary>Flush all buffered events immediately. Must be called from the main thread.</summary>
-        public void Flush()
-        {
-            try
-            {
-                if (Interlocked.CompareExchange(ref _isFlushing, 1, 0) != 0) return;
-                if (!_initialized || _buffer.Count == 0)
-                {
-                    Interlocked.Exchange(ref _isFlushing, 0);
-                    return;
-                }
-                // Reset _flushRequested AFTER the _isFlushing guard so a
-                // background-thread request arriving between the two checks
-                // is not silently dropped.
-                _flushRequested = false;
-                Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
-
-                // Head-alignment guard: if the ring dropped events since restore while
-                // persisted events are still pending ack, the in-memory head no longer
-                // lines up with the on-disk head, so a positional DropOldest could ack the
-                // wrong events. Conservatively clear the queue and stop positional acking
-                // (the evicted events are old telemetry shed under sustained overload).
-                if (_offlineQueueActive && _pendingPersistedEventsToAck > 0
-                    && _buffer.DroppedCount != _persistedDropBaseline)
-                {
-                    _persistence.Clear();
-                    _pendingPersistedEventsToAck = 0;
-                    _persistedDropBaseline = _buffer.DroppedCount;
-                    Debug.LogWarning("[Framedash] Offline queue head misaligned after a buffer overflow; cleared the persisted queue to avoid acking the wrong events.");
-                }
-
-                TelemetryEvent[] batch = _buffer.DequeueAll();
-                // The leading min(pendingAck, batch) events are already on disk; mark
-                // them so the flush can ack (DropOldest) them on success and avoid
-                // re-persisting them on failure. They leave the buffer now, so drop them
-                // from the pending count (whether the send succeeds or not).
-                int persistedCount = Math.Min(_pendingPersistedEventsToAck, batch.Length);
-                _pendingPersistedEventsToAck -= persistedCount;
-                _inFlightFlush = StartCoroutine(FlushCoroutine(batch, _flushGeneration, persistedCount));
-            }
-            catch (Exception e)
-            {
-                Interlocked.Exchange(ref _isFlushing, 0);
-                Debug.LogError($"[Framedash] Flush() failed: {e}");
-            }
-        }
-
-        private IEnumerator FlushCoroutine(TelemetryEvent[] events, int generation, int persistedCount)
-        {
-            var result = new DeliveryResult();
-            try
-            {
-                yield return _transport.SendBatch(events, result);
-            }
-            finally
-            {
-                // A re-init (Shutdown then Initialize) makes this flush stale: a newer
-                // session now owns the offline queue and the single-flight guard. Skip
-                // both the queue accounting and the guard release so the stale flush
-                // cannot disturb the new session (matches the Godot FlushAsync guard and
-                // UE5, whose transport AliveFlag drops a stale flush's callback).
-                if (generation == _flushGeneration)
-                {
-                    ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount);
-                    _inFlightFlush = null;
-                    Interlocked.Exchange(ref _isFlushing, 0);
-                }
-            }
-        }
-
-        // Reconcile the offline queue with what the transport delivered. The batch is
-        // laid out as [persisted leading block | fresh tail], and the transport reports
-        // how many leading events were delivered:
-        //   - acknowledge (DropOldest) the persisted events that were delivered =
-        //     min(persistedCount, deliveredLeadingCount), the leading-and-on-disk block;
-        //   - persist (Append) the undelivered fresh tail = events at index >=
-        //     max(deliveredLeadingCount, persistedCount) (not delivered AND not already
-        //     on disk), so a transient failure keeps them for the next run.
-        // Undelivered events still inside the persisted block stay on disk untouched
-        // (never double-persisted). The common case (no persisted events, full delivery)
-        // touches no disk at all.
-        private void ApplyPersistenceResult(TelemetryEvent[] events, int persistedCount, int deliveredLeadingCount)
-        {
-            if (!_offlineQueueActive) return;
-            try
-            {
-                int ackCount = Math.Min(persistedCount, deliveredLeadingCount);
-                if (ackCount > 0) _persistence.DropOldest(ackCount);
-
-                int persistStart = Math.Max(deliveredLeadingCount, persistedCount);
-                if (persistStart < events.Length)
-                {
-                    var toPersist = new TelemetryEvent[events.Length - persistStart];
-                    Array.Copy(events, persistStart, toPersist, 0, toPersist.Length);
-                    if (!_persistence.Append(toPersist))
-                    {
-                        // Disk write failed (full / permissions): the tail was already
-                        // dequeued, so re-enqueue it to the in-memory buffer to retry on a
-                        // later flush rather than dropping it. These events are fresh (not
-                        // on disk), so they go to the tail and do not affect the persisted
-                        // leading block. The ring still bounds memory if the disk stays bad.
-                        Debug.LogWarning($"[Framedash] Offline queue write failed; keeping {toPersist.Length} event(s) in memory for retry.");
-                        foreach (var evt in toPersist) _buffer.Enqueue(evt);
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] Offline queue update failed: {e}");
-            }
-        }
-
-        /// <summary>Shutdown the SDK gracefully.</summary>
-        public void Shutdown()
-        {
-            try
-            {
-                if (!_initialized) return;
-                if (_flushCoroutine != null) StopCoroutine(_flushCoroutine);
-                // Stop the in-flight send (if any) so its generation-gated finally runs now
-                // and persists the batch it had already dequeued -- otherwise those events,
-                // which are no longer in _buffer, would be lost on quit. Stopping a finished
-                // coroutine is a no-op. The finally sees DeliveredLeadingCount unset (0) for
-                // an interrupted send, so it persists the whole undelivered tail.
-                if (_inFlightFlush != null)
-                {
-                    StopCoroutine(_inFlightFlush);
-                    _inFlightFlush = null;
-                }
-                if (_offlineQueueActive)
-                {
-                    // Persist whatever is still buffered instead of a best-effort network
-                    // flush: a synchronous disk write completes before the app exits, and
-                    // the offline queue resends next run. An in-flight periodic flush at
-                    // this instant is not captured -- the same best-effort limitation that
-                    // applies to any in-flight send on a hard exit.
-                    TelemetryEvent[] remaining = _buffer.DequeueAll();
-                    // Skip the leading block already on disk (restored this run and not yet
-                    // flushed); appending it would double-persist those events and resend
-                    // them twice next run. Only the fresh tail needs persisting.
-                    int alreadyPersisted = Math.Min(_pendingPersistedEventsToAck, remaining.Length);
-                    int freshCount = remaining.Length - alreadyPersisted;
-                    if (freshCount > 0)
-                    {
-                        var fresh = new TelemetryEvent[freshCount];
-                        Array.Copy(remaining, alreadyPersisted, fresh, 0, freshCount);
-                        if (_persistence.Append(fresh))
-                            Debug.Log($"[Framedash] Shutdown: persisted {freshCount} buffered event(s) for next run.");
-                        else
-                            Debug.LogWarning($"[Framedash] Shutdown: {freshCount} buffered event(s) could not be persisted.");
-                    }
-                }
-                else
-                {
-                    // No disk fallback -- best-effort final network flush (may not finish on quit).
-                    Flush();
-                }
-                _initialized = false;
-                Debug.Log("[Framedash] SDK shut down.");
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] Shutdown() failed: {e}");
-            }
-        }
-
-        private IEnumerator FlushLoop()
-        {
-            float lastFlushTime = Time.realtimeSinceStartup;
-            while (true)
-            {
-                // Poll each frame up to the flush interval (capped at 1s) and
-                // break early when Track() sets _flushRequested.
-                // Per-frame bool check is negligible; battery cost comes from network I/O.
-                float pollWindow = Mathf.Min(_flushPolicy.FlushIntervalSeconds, 1.0f);
-                float waitStart = Time.realtimeSinceStartup;
-                while (!_flushRequested && (Time.realtimeSinceStartup - waitStart) < pollWindow)
-                {
-                    yield return null;
-                }
-                float elapsed = Time.realtimeSinceStartup - lastFlushTime;
-                if (_flushPolicy.ShouldFlush(_flushRequested, elapsed))
-                {
-                    lastFlushTime = Time.realtimeSinceStartup;
-                    Flush();
-                }
-                // Guarantee at least one yield per outer iteration to prevent
-                // tight-spinning when _flushRequested stays set (e.g. a flush
-                // is already in progress so Flush() returns without clearing it).
-                yield return null;
-            }
-        }
-
-        private void OnApplicationPause(bool pauseStatus)
-        {
-            // Wrap so no exception escapes the engine callback (the NEVER-throw hard rule).
-            try
-            {
-                if (pauseStatus) Flush();
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] OnApplicationPause() failed: {e}");
-            }
-        }
-
-        private void OnApplicationQuit()
-        {
-            // Wrap so no exception escapes the engine callback (the NEVER-throw hard rule).
-            try
-            {
-                Shutdown();
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] OnApplicationQuit() failed: {e}");
-            }
-        }
-
-#if UNITY_EDITOR
-        // Propagate an Inspector edit of _verboseLogging to the live transport. Unity
-        // writes a [SerializeField] private field directly (bypassing the VerboseLogging
-        // property setter), so without this an in-editor Play Mode toggle would not reach
-        // _transport. Editor-only (OnValidate never runs in a build) and no-op before init.
-        private void OnValidate()
-        {
-            if (_transport != null) _transport.VerboseLogging = _verboseLogging;
-        }
-#endif
-
-        private void OnDestroy()
-        {
-            // Wrap so no exception escapes the engine callback (the NEVER-throw hard rule).
-            try
-            {
-                if (s_instance == this)
-                {
-                    Shutdown();
-                    s_instance = null;
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[Framedash] OnDestroy() failed: {e}");
-            }
-        }
     }
 }

@@ -1,5 +1,8 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Framedash
 {
@@ -61,7 +64,7 @@ namespace Framedash
 	/// before, and permitted by the "per-event when Track() carries
 	/// attributes/metrics" allocation-discipline carve-out.
 	///
-	/// Engine-independent and NUnit-tested; thread-safe (Track() can run off
+	/// Engine-independent and NextUnit-tested; thread-safe (Track() can run off
 	/// the main thread while the heartbeat coroutine refreshes on the main
 	/// thread).
 	/// </summary>
@@ -69,10 +72,7 @@ namespace Framedash
 	{
 		private readonly object _lock = new object();
 
-		// The frozen, shareable snapshot for the "caller supplied no metrics"
-		// case. Null when nothing is cached. Vram-first ordering matches the
-		// priority used by the cap-aware merge in AppendTo below.
-		private List<FloatPair> _cachedList;
+		private List<FloatPair>? _cachedList;
 
 		/// <summary>
 		/// Re-sample the source and publish a brand-new frozen snapshot list.
@@ -83,7 +83,7 @@ namespace Framedash
 		/// swaps the field to a new instance -- so any event already holding a
 		/// reference to the old snapshot is unaffected.
 		/// </summary>
-		public void Refresh(IMemoryMetricsSource source)
+		public void Refresh(IMemoryMetricsSource? source)
 		{
 			bool hasVram = false;
 			float vram = 0f;
@@ -119,7 +119,7 @@ namespace Framedash
 				}
 			}
 
-			List<FloatPair> snapshot = null;
+			List<FloatPair>? snapshot = null;
 			if (hasVram)
 			{
 				snapshot = new List<FloatPair>(2) { new FloatPair(MemoryStats.KeyVram, vram) };
@@ -137,32 +137,30 @@ namespace Framedash
 		}
 
 		/// <summary>
-		/// Append the cached mem.* readings onto an event's metrics list, or
-		/// return it unchanged when nothing is cached.
+		/// Null-input (no caller metrics) fast path: returns the cached frozen snapshot list
+		/// DIRECTLY, shared across every position-qualified event until the next Refresh -- zero
+		/// allocation on the per-event path (see the class-level ownership comment for why this is
+		/// safe).
 		///
-		/// Null-input (no caller metrics) fast path: returns the cached frozen
-		/// snapshot list DIRECTLY, shared across every position-qualified event
-		/// until the next Refresh -- zero allocation on the per-event path (see
-		/// the class-level ownership comment for why this is safe).
+		/// Non-null input: a key already present in `metrics` (a caller-supplied metric of the same
+		/// name) is left alone -- per- event data always wins on collision, mirroring
+		/// SessionManager.MergeAttributes' session-first / event-overrides order. Also enforces the
+		/// same FieldClamp.MaxMetrics cap that FieldClamp.ClampMetrics applies to the caller's
+		/// dictionary upstream (Track() runs ClampMetrics before calling AppendTo): a mem.* key is
+		/// appended only while the list is still below the cap. A caller who already supplied
+		/// MaxMetrics valid entries must see NO behavior change from this feature (ingest rejects the
+		/// whole batch on an over-cap event, so silently pushing a 50-entry list to 51/52 would be
+		/// worse than just omitting mem.* for that one event). When only one slot is left, mem.vram
+		/// takes priority over mem.heap (VRAM pressure is the more common heatmap signal for perf
+		/// regressions).
 		///
-		/// Non-null input: a key already present in <paramref name="metrics"/>
-		/// (a caller-supplied metric of the same name) is left alone -- per-
-		/// event data always wins on collision, mirroring
-		/// SessionManager.MergeAttributes' session-first / event-overrides
-		/// order. Also enforces the same FieldClamp.MaxMetrics cap that
-		/// FieldClamp.ClampMetrics applies to the caller's dictionary upstream
-		/// (Track() runs ClampMetrics before calling AppendTo): a mem.* key is
-		/// appended only while the list is still below the cap. A caller who
-		/// already supplied MaxMetrics valid entries must see NO behavior
-		/// change from this feature (ingest rejects the whole batch on an
-		/// over-cap event, so silently pushing a 50-entry list to 51/52 would
-		/// be worse than just omitting mem.* for that one event). When only one
-		/// slot is left, mem.vram takes priority over mem.heap (VRAM pressure
-		/// is the more common heatmap signal for perf regressions).
+		/// Every branch returns the caller list when it is non-null, so a non-null input can never
+		/// yield null -- keep that flowing to nullable-enabled callers.
 		/// </summary>
-		public List<FloatPair> AppendTo(List<FloatPair> metrics)
+		[return: NotNullIfNotNull("metrics")]
+		public List<FloatPair>? AppendTo(List<FloatPair>? metrics)
 		{
-			List<FloatPair> cached;
+			List<FloatPair>? cached;
 			lock (_lock)
 			{
 				cached = _cachedList;

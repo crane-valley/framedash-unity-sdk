@@ -24,7 +24,6 @@ namespace Framedash
 		// Reusable buffer — avoids per-call GC allocation.
 		private readonly FrameTiming[] _timings = new FrameTiming[1];
 
-		// Cached per-frame values from FrameTimingManager.
 		private float _cachedGpuTimeMs;
 		private float _cachedGameThreadMs;
 		private float _cachedRenderThreadMs;
@@ -42,7 +41,6 @@ namespace Framedash
 			uint count = FrameTimingManager.GetLatestTimings(1, _timings);
 			if (count == 0)
 			{
-				// Signal "unavailable" per proto contract (0 = not collected).
 				_cachedGpuTimeMs = 0f;
 				_cachedGameThreadMs = 0f;
 				_cachedRenderThreadMs = 0f;
@@ -54,7 +52,6 @@ namespace Framedash
 			_cachedRenderThreadMs = (float)_timings[0].cpuRenderThreadFrameTime;
 		}
 
-		/// <summary>Collect current frame performance data using cached timings.</summary>
 		public PerfSnapshot Collect()
 		{
 			float deltaTime = Time.unscaledDeltaTime;

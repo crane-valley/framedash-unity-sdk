@@ -2,6 +2,12 @@
 
 Unity UPM package for collecting game telemetry and sending it to the Framedash platform.
 
+## Use cases
+
+- **Game telemetry:** capture custom gameplay events, spatial positions, automatic performance metrics, and build/session metadata.
+- **Heatmap analytics:** explore cloud-aggregated player and performance hotspots in the Framedash dashboard or directly in the Unity Scene view.
+- **Performance regression CI:** label automated runs by build, compare candidates with `framedash perf-diff`, and fail CI when a configured regression threshold is exceeded.
+
 ## Requirements
 
 - Unity 2022.3+
@@ -15,6 +21,8 @@ https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
 To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.7`.
+
+> **Test sources are intentionally excluded from this public distribution.** The private monorepo keeps the engine-free NextUnit harness under `Tests/` for SDK development. It is omitted from the UPM git package because Unity would import those C# files without the NextUnit NuGet dependency, leaving the NextUnit APIs unresolved. There is no `Tests/` folder in the package installed through the git URL.
 
 ## In-Editor Quickstart (fastest first activation)
 
@@ -77,7 +85,7 @@ apply a deliberate display translation; it does not rewrite cloud coordinates.
 
 | File | Description |
 |------|-------------|
-| `TelemetrySDK.cs` | Main entry point — initialization, configuration, session lifecycle |
+| `TelemetrySDK*.cs` | Main entry point — initialization, configuration, tracking, delivery, persistence, and session lifecycle |
 | `TelemetryEvent.cs` | Event data model |
 | `TelemetrySerializer.cs` | Event serialization |
 | `ProtobufWriter.cs` | Protobuf binary encoding |
@@ -322,7 +330,7 @@ GPU metrics. A per-event attribute with the same key overrides the session value
 
 If your CI harness exports the standard Framedash variables (`FRAMEDASH_BUILD_ID`,
 `FRAMEDASH_GIT_BRANCH`, `FRAMEDASH_GIT_COMMIT`, `FRAMEDASH_TEST_SCENARIO`) -- the
-planned `framedash run-profile-test` runner will export these for you -- call the
+`framedash run-profile-test` runner exports these for you -- call the
 zero-argument overload instead:
 
 ```csharp
@@ -344,6 +352,67 @@ Two things to know when wiring this into a real pipeline:
   projects strip on ingest -- under COPPA only `build_id` survives. If you run
   automated profiling on a COPPA project, make `build_id` carry everything the
   comparison must distinguish.
+
+## Per-frame run capture (pilot)
+
+This opt-in API is added in SDK 0.1.8; version 0.1.7 and earlier do not include it.
+COPPA-enabled organizations cannot use this pilot: server-side redaction removes
+its run attributes, and the comparison endpoint returns 403. Local capture/flush
+success does not establish eligibility. After initialization and build identity setup, call
+`BeginPerformanceRun(PerformanceRunOptions)` on the main thread around a known
+scenario. Supply a fresh lowercase UUID v4 `RunId`, `Scenario`, `Hardware`,
+`Graphics`, `Resolution`, `Configuration`, actual `Commit`, and `Branch`.
+Each declared label and the build ID must be nonblank, at most 128 characters,
+and contain no ASCII control characters. Machine profiles are declarations,
+not hardware attestation; do not put personal identifiers in them.
+
+`WarmupFrames` defaults to 120 (allowed 0..60,000); `TargetFrames` defaults to
+3,600 (allowed 1,000..1,000,000). Monotonic intervals between SDK `Update`
+callbacks are collected into 256 fixed bins with exact hitch counts. The first
+callback after beginning is excluded. Invalid or >=32,768 ms measurement
+intervals count as dropped and cannot pass completion. This is player-loop
+wall time, not GPU or present-to-present timing.
+
+Check the boolean from `BeginPerformanceRun`, then call `EndPerformanceRun()`
+after scenario completion. An intentional abort uses `completed: false`.
+Ending before the frame budget completes, dropped samples, and shutdown without
+an explicit successful end remain incomplete. Check completion and the existing
+bounded `FlushBlocking` result separately; local capture does not prove delivery.
+CLI 0.1.11 adds `run-diff` to compare run IDs and optional unchanged repeats.
+It reports intervals and condition/completeness failures without changing the
+existing `perf-diff` gate. `run-profile-test` alone does not enable this capture.
+
+## Synchronous Flush
+
+`Flush()` schedules an asynchronous send and returns immediately. When a level
+transition or shutdown can afford a short block, use `FlushBlocking` to wait for
+an HTTP acknowledgement. HTTP 202 does not prove durable storage; verify a fresh
+marker through an authorized read when persistence evidence is needed.
+
+```csharp
+bool delivered = TelemetrySDK.Instance.FlushBlocking(timeoutMs: 2000);
+```
+
+- The budget is clamped to 30,000 ms. A `timeoutMs <= 0` returns `false`
+  immediately without sending.
+- It drives a bounded synchronous socket POST (Unity's coroutine/UnityWebRequest
+  path cannot run from a blocked main thread), using the same Protobuf + gzip wire
+  format and headers as the normal transport, and honors the same endpoint
+  transport-security check (HTTPS, or HTTP only for loopback).
+- It never throws and never blocks meaningfully past the budget.
+- It loses nothing on failure or timeout. With the offline queue enabled the
+  undelivered events are written to the on-disk queue, which is loaded at SDK
+  initialization -- so their delivery resumes on the next run (the current run's
+  periodic flush does not re-read the disk queue). With the queue disabled the
+  undelivered events stay in the in-memory buffer and the current run's periodic
+  flush retries them.
+- A batch whose delivery confirmation arrives only after the deadline is still
+  acknowledged (it was delivered, so it is not resent -- no duplicate); the
+  `false` return then only reports that confirmation missed the budget.
+- It returns `false` (sending nothing) when the SDK is not initialized, the
+  endpoint failed the security check, on WebGL (no sockets), or when called from a
+  thread other than the main thread (a warning is logged; the call is never
+  marshaled-and-blocked).
 
 ## Offline Queue
 

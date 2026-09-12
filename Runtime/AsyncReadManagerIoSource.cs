@@ -50,17 +50,10 @@ namespace Framedash
     internal sealed class AsyncReadManagerIoSource : ICumulativeIoCounters
     {
 #if ENABLE_PROFILER && UNITY_2020_2_OR_NEWER
-        /// <summary>
-        /// Start metrics collection and return a delta source, or null if the API
-        /// throws (for example a platform without the profiler backend). Called once
-        /// at init; failure leaves the SDK on the manual feed only.
-        /// </summary>
         public static IIoMetricsSource TryCreate()
         {
             try
             {
-                // Idempotent; safe if a host already started collection. Never stopped
-                // on shutdown (see class comment).
                 AsyncReadManagerMetrics.StartCollectingMetrics();
                 return new IoWindowDelta(new AsyncReadManagerIoSource());
             }
@@ -84,7 +77,6 @@ namespace Framedash
 
                 totalBytes = (long)s.TotalBytesRead;
                 completedRequests = (long)s.NumberOfCompletedRequests;
-                // Summary exposes an AVERAGE read time; cumulative total = average * count.
                 double totalMicros = (double)s.AverageReadTimeMicroseconds * (double)s.NumberOfCompletedRequests;
                 totalReadTimeMicros = totalMicros >= (double)long.MaxValue ? long.MaxValue : (long)totalMicros;
                 return true;

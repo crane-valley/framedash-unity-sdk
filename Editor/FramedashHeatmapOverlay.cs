@@ -148,7 +148,6 @@ namespace Framedash.Editor
             {
                 name = "Framedash Heatmap Overlay",
                 hideFlags = HideFlags.HideAndDontSave,
-                // UInt32 leaves headroom if the API grows beyond the UInt16 ~16k-quad ceiling.
                 indexFormat = IndexFormat.UInt32
             };
             _mesh.vertices = vertices;
