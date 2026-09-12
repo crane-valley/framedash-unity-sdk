@@ -6,9 +6,7 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
-## [0.1.8] - Publication pending
-
-Prepared in source; the public v0.1.8 tag is not yet verified.
+## [0.1.8] - 2026-09-12
 
 Shutdown attempts both recovered and buffered envelopes asynchronously without
 merging their dedup identities. The player loop must continue; with persistence

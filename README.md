@@ -20,7 +20,7 @@ Add via Unity Package Manager using the git URL:
 https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
-To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.7`.
+To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.8`.
 
 > **Test sources are intentionally excluded from this public distribution.** The private monorepo keeps the engine-free NextUnit harness under `Tests/` for SDK development. It is omitted from the UPM git package because Unity would import those C# files without the NextUnit NuGet dependency, leaving the NextUnit APIs unresolved. There is no `Tests/` folder in the package installed through the git URL.
 
@@ -356,8 +356,9 @@ Two things to know when wiring this into a real pipeline:
 ## Per-frame run capture (pilot)
 
 This opt-in API is added in SDK 0.1.8; version 0.1.7 and earlier do not include it.
-Until the public v0.1.8 tag is verified, this pilot requires a package built from
-this source tree. The v0.1.7 installation example above does not include this API.
+Install the v0.1.8 tag to use this API. The
+[public pilot guide](https://docs.framedash.dev/en/guides/unity-performance-runs/)
+covers baseline, unchanged-repeat and candidate measurements on your own PC.
 COPPA-enabled organizations cannot use this pilot: server-side redaction removes
 its run attributes, and the comparison endpoint returns 403. Local capture/flush
 success does not establish eligibility. After initialization and build identity setup, call
