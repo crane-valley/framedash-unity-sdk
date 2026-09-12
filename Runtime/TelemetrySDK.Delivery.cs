@@ -20,8 +20,9 @@ namespace Framedash
                 // Reset _flushRequested AFTER the _isFlushing guard so a
                 // background-thread request arriving between the two checks
                 // is not silently dropped.
+                bool retainedFromBlocking = _inFlightBatch != null;
                 _flushRequested = false;
-                Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
+                if (!retainedFromBlocking) Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
 
                 // Head-alignment guard: if the ring dropped events since restore while
                 // persisted events are still pending ack, the in-memory head no longer
@@ -37,7 +38,6 @@ namespace Framedash
                     Debug.LogWarning("[Framedash] Offline queue head misaligned after a buffer overflow; cleared the persisted queue to avoid acking the wrong events.");
                 }
 
-                bool retainedFromBlocking = _inFlightBatch != null;
                 TelemetryEvent[] batch = _inFlightBatch ?? _buffer.DequeueAll();
                 // The leading min(pendingAck, batch) events are already on disk; mark
                 // them so the flush can ack (DropOldest) them on success and avoid
@@ -85,6 +85,8 @@ namespace Framedash
                         ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount);
                         _inFlightBatch = null;
                     }
+                    if (retainInMemory && _inFlightBatch == null && _initialized && _buffer.Count > 0)
+                        _flushRequested = true;
                     _inFlightFlush = null;
                     Interlocked.Exchange(ref _isFlushing, 0);
                 }
@@ -96,7 +98,7 @@ namespace Framedash
         {
             if (!_offlineQueueActive) return true;
             int ackCount = Math.Min(persistedCount, deliveredLeadingCount);
-            bool persistenceOk = !_persistenceAcknowledgementFailed;
+            bool persistenceOk = ackCount == 0 || !_persistenceAcknowledgementFailed;
             try
             {
                 // A later positional ack cannot skip an earlier prefix that failed removal.

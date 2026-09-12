@@ -19,6 +19,8 @@ while shutdown is stopping them, before the shutdown envelopes are captured.
 Failed offline-queue acknowledgements now make blocking flush return false and
 pause later positional acknowledgements until reinitialization. Tracking APIs
 expose nullable metadata for optional references and non-null event names.
+Fresh fully delivered events remain successful when no disk acknowledgement is
+needed. A completed recovered send re-arms delivery of the untouched producer ring.
 Initialization parameters and the optional session ID carry nullable metadata;
 the `Initialize` return value remains non-null.
 
