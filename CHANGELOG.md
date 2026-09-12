@@ -10,6 +10,13 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 Prepared in source; the public v0.1.8 tag is not yet verified.
 
+Shutdown preserves a recovered in-memory envelope for its last best-effort send.
+With persistence disabled, memory retention cannot survive process exit.
+
+Failed offline-queue acknowledgements now make blocking flush return false and
+pause later positional acknowledgements until reinitialization. Tracking APIs
+expose nullable metadata for optional references and non-null event names.
+
 ### Added
 
 - Opt-in `BeginPerformanceRun` / `EndPerformanceRun` with explicit run UUIDs,

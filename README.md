@@ -412,6 +412,9 @@ bool delivered = TelemetrySDK.Instance.FlushBlocking(timeoutMs: 2000);
   periodic flush does not re-read the disk queue). With the queue disabled the
   undelivered events stay in the in-memory buffer and the current run's periodic
   flush retries them.
+- A failed offline-queue acknowledgement returns `false` and logs a warning.
+  Later positional acknowledgements pause until reinitialization to avoid
+  removing the wrong queued prefix. Already delivered events may replay from disk.
 - A batch whose delivery confirmation arrives only after the deadline is still
   acknowledged (it was delivered, so it is not resent -- no duplicate); the
   `false` return then only reports that confirmation missed the budget.

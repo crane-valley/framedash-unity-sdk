@@ -91,24 +91,21 @@ namespace Framedash
             }
         }
 
-        // Reconcile the offline queue with what the transport delivered. The batch is
-        // laid out as [persisted leading block | fresh tail], and the transport reports
-        // how many leading events were delivered:
-        //   - acknowledge (DropOldest) the persisted events that were delivered =
-        //     min(persistedCount, deliveredLeadingCount), the leading-and-on-disk block;
-        //   - persist (Append) the undelivered fresh tail = events at index >=
-        //     max(deliveredLeadingCount, persistedCount) (not delivered AND not already
-        //     on disk), so a transient failure keeps them for the next run.
-        // Undelivered events still inside the persisted block stay on disk untouched
-        // (never double-persisted). The common case (no persisted events, full delivery)
-        // touches no disk at all.
-        private void ApplyPersistenceResult(TelemetryEvent[] events, int persistedCount, int deliveredLeadingCount)
+        // Re-appending an undelivered persisted prefix would duplicate it on the next run.
+        private bool ApplyPersistenceResult(TelemetryEvent[] events, int persistedCount, int deliveredLeadingCount)
         {
-            if (!_offlineQueueActive) return;
+            if (!_offlineQueueActive) return true;
+            int ackCount = Math.Min(persistedCount, deliveredLeadingCount);
+            bool persistenceOk = !_persistenceAcknowledgementFailed;
             try
             {
-                int ackCount = Math.Min(persistedCount, deliveredLeadingCount);
-                if (ackCount > 0) _persistence.DropOldest(ackCount);
+                // A later positional ack cannot skip an earlier prefix that failed removal.
+                if (ackCount > 0 && persistenceOk && !_persistence.DropOldest(ackCount))
+                {
+                    _persistenceAcknowledgementFailed = true;
+                    persistenceOk = false;
+                    Debug.LogWarning("[Framedash] Offline queue acknowledgement failed; positional acknowledgements are paused until reinitialization. Delivered events may replay.");
+                }
 
                 int persistStart = Math.Max(deliveredLeadingCount, persistedCount);
                 if (persistStart < events.Length)
@@ -117,6 +114,7 @@ namespace Framedash
                     Array.Copy(events, persistStart, toPersist, 0, toPersist.Length);
                     if (!_persistence.Append(toPersist))
                     {
+                        persistenceOk = false;
                         // Disk write failed (full / permissions): the tail was already
                         // dequeued, so re-enqueue it to the in-memory buffer to retry on a
                         // later flush rather than dropping it. These events are fresh (not
@@ -126,30 +124,20 @@ namespace Framedash
                         foreach (var evt in toPersist) _buffer.Enqueue(evt);
                     }
                 }
+                return persistenceOk;
             }
             catch (Exception e)
             {
+                if (ackCount > 0) _persistenceAcknowledgementFailed = true;
                 Debug.LogError($"[Framedash] Offline queue update failed: {e}");
+                return false;
             }
         }
 
         /// <summary>
-        /// Synchronously flush every event buffered at call time, blocking the main
-        /// thread up to <paramref name="timeoutMs"/> milliseconds (clamped to 30,000),
-        /// and return whether all of them were CONFIRMED delivered (HTTP 2xx) within the
-        /// budget. Use it at a moment that can afford a short block -- level end, or
-        /// before quit on a platform without offline storage -- to guarantee delivery
-        /// instead of relying on the periodic flush + offline queue.
-        ///
-        /// Returns false, losing nothing, on: timeout, transport failure, the SDK not
-        /// initialized or the endpoint failing the transport-security check,
-        /// <paramref name="timeoutMs"/> &lt;= 0, WebGL (no sockets), or a call from a
-        /// thread other than the main thread (a warning is logged; the call is NOT
-        /// marshaled-and-blocked). Undelivered events stay buffered / on the offline
-        /// queue, so a false return never drops telemetry.
-        ///
-        /// Never throws (fail-safe), never blocks meaningfully past the budget, and the
-        /// SDK keeps operating normally afterward (the periodic flush resumes).
+        /// Coroutine delivery cannot advance while the main thread is blocked. A bounded
+        /// synchronous attempt can run before exit, but HTTP acknowledgement does not prove
+        /// durable ingestion and disabled persistence cannot retain memory after process exit.
         /// </summary>
         public bool FlushBlocking(int timeoutMs)
         {
@@ -344,17 +332,14 @@ namespace Framedash
             return allDelivered && withinBudget;
         }
 
-        // Reconcile ONE independent blocking-flush envelope: ack its delivered persisted
-        // prefix (DropOldest) and keep the undelivered remainder -- persisted with the
-        // offline queue on (ApplyPersistenceResult), re-buffered with it off so nothing is
-        // lost. Envelopes are never merged (that would change the consumer's dedup token).
-        // Returns whether the whole envelope was confirmed delivered.
+        // Merging envelopes would change the consumer's dedup token.
         private bool ReconcileBlockingEnvelope(TelemetryEvent[] events, int persistedCount, int delivered)
         {
             if (events == null || events.Length == 0) return true;
             if (_offlineQueueActive)
             {
-                ApplyPersistenceResult(events, persistedCount, delivered);
+                bool persisted = ApplyPersistenceResult(events, persistedCount, delivered);
+                return delivered == events.Length && persisted;
             }
             else if (delivered < events.Length)
             {
@@ -384,20 +369,13 @@ namespace Framedash
                 if (!_initialized) return;
                 if (_flushCoroutine != null) StopCoroutine(_flushCoroutine);
                 EndPerformanceRun(completed: false);
-                // Stop the in-flight send (if any) so its generation-gated finally runs now
-                // and persists the batch it had already dequeued -- otherwise those events,
-                // which are no longer in _buffer, would be lost on quit. Stopping a finished
-                // coroutine is a no-op. The finally sees DeliveredLeadingCount unset (0) for
-                // an interrupted send, so it persists the whole undelivered tail.
+                // The finalizer owns persistence or recovery; clearing its retained tail
+                // would drop a failed blocking batch before the last best-effort send.
                 if (_inFlightFlush != null)
                 {
                     StopCoroutine(_inFlightFlush);
                     _inFlightFlush = null;
-                    _inFlightBatch = null;
-                    // Same nested-enumerator dispose gap as the FlushBlocking reclaim: the
-                    // stopped coroutine's own finally runs (persisting the batch), but its
-                    // yielded SendBatch enumerator -- and the UnityWebRequest inside -- may
-                    // not be disposed by the engine. Release it explicitly.
+                    // Unity may leave yielded transport iterators alive after stopping the owner.
                     _transport.AbortInFlightRequest();
                 }
                 if (_offlineQueueActive)

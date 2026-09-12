@@ -81,6 +81,7 @@ namespace Framedash
         // Captured from _enableOfflineQueue at init so a later inspector toggle cannot desync
         // the live provider mid-session.
         private bool _offlineQueueActive;
+        private bool _persistenceAcknowledgementFailed;
         // Number of leading buffered events already on disk (restored from a prior run,
         // or a previous flush's persisted block). The first N events the buffer dequeues
         // map, in order, to the first N events of the on-disk queue, so a successful
@@ -434,6 +435,7 @@ namespace Framedash
                 ? (IPersistenceProvider)new FilePersistence(FilePersistence.DefaultQueueFilePath(_endpointUrl + "\n" + effectiveApiKey))
                 : new NullPersistence();
             _pendingPersistedEventsToAck = 0;
+            _persistenceAcknowledgementFailed = false;
             if (_offlineQueueActive)
             {
                 TelemetryEvent[] restored = _persistence.Load();

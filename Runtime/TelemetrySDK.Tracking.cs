@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -7,9 +9,9 @@ namespace Framedash
 {
     public sealed partial class TelemetrySDK : MonoBehaviour
     {
-        public void Track(string eventName, string mapId = "",
-            Vector3? position = null, Dictionary<string, string> attributes = null,
-            Dictionary<string, float> metrics = null)
+        public void Track(string eventName, string? mapId = "",
+            Vector3? position = null, Dictionary<string, string>? attributes = null,
+            Dictionary<string, float>? metrics = null)
         {
             try
             {
@@ -43,8 +45,8 @@ namespace Framedash
                 // Convert Dictionary parameters to serializable List types, enforcing the
                 // ingest-core caps client-side (count, key/value length, finite metrics) so a
                 // single oversized map cannot make the consumer drop the whole flush.
-                List<StringPair> attrList = FieldClamp.ClampAttributes(attributes);
-                List<FloatPair> metricList = FieldClamp.ClampMetrics(metrics);
+                List<StringPair>? attrList = FieldClamp.ClampAttributes(attributes);
+                List<FloatPair>? metricList = FieldClamp.ClampMetrics(metrics);
 
                 string safeMapId = FieldClamp.Truncate(mapId ?? "", FieldClamp.MaxMapIdLength);
 
@@ -92,7 +94,7 @@ namespace Framedash
                 // carries no metrics. The refreshed _memCache is also what position-
                 // qualified Track() events attach (see Track()) until the next
                 // heartbeat -- so this is the only place mem.* is ever sampled.
-                List<FloatPair> metrics = null;
+                List<FloatPair>? metrics = null;
                 if (eventName == HeartbeatEventName)
                 {
                     _memCache.Refresh(_memSource);
@@ -117,8 +119,8 @@ namespace Framedash
             string mapId,
             float posX, float posY, float posZ,
             TelemetrySource source,
-            List<StringPair> attributes,
-            List<FloatPair> metrics,
+            List<StringPair>? attributes,
+            List<FloatPair>? metrics,
             bool attachPerformance = true,
             bool preserveBufferedEvents = false)
         {
@@ -204,7 +206,7 @@ namespace Framedash
             return true;
         }
 
-        public void SetPlayerId(string playerId)
+        public void SetPlayerId(string? playerId)
         {
             if (!_initialized)
             {
@@ -348,8 +350,8 @@ namespace Framedash
         /// no-op. Call once after Initialize(), before the profiling run. No-op if the SDK is
         /// not initialized.
         /// </summary>
-        public void BeginAutomatedSession(string buildId = null, string branch = null,
-            string commit = null, string scenario = null)
+        public void BeginAutomatedSession(string? buildId = null, string? branch = null,
+            string? commit = null, string? scenario = null)
         {
             try
             {
@@ -367,9 +369,9 @@ namespace Framedash
                 // session attributes, so a later End cannot clear state this call never set.
                 if (!hasBuildId && !hasBranch && !hasCommit && !hasScenario) return;
                 var attrs = new Dictionary<string, string>();
-                if (hasBranch) attrs["ci.branch"] = branch;
-                if (hasCommit) attrs["ci.commit"] = commit;
-                if (hasScenario) attrs["ci.scenario"] = scenario;
+                if (hasBranch && branch != null) attrs["ci.branch"] = branch;
+                if (hasCommit && commit != null) attrs["ci.commit"] = commit;
+                if (hasScenario && scenario != null) attrs["ci.scenario"] = scenario;
                 // Install the build_id override + ci.* attributes as one atomic snapshot. Each
                 // Begin fully (re)defines the session: a supplied buildId becomes the override,
                 // otherwise it is cleared back to the configured build_id fallback -- the same
