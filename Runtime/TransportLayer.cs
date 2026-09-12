@@ -89,6 +89,9 @@ namespace Framedash
         // Stopped nested iterators may never run their finally, so abort must retain the token.
         private CancellationTokenSource _activeFallback;
 
+        // A reconfigured endpoint gets a new transport, isolated from the old host's stalled lookup.
+        internal readonly PendingDnsResolver BlockingDnsResolver = new PendingDnsResolver(Dns.GetHostAddressesAsync);
+
         // Out-param holder for the fallback coroutine (coroutines cannot return).
         private sealed class FallbackResult
         {

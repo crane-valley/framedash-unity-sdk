@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Diagnostics;
 using System.Threading;
@@ -6,7 +8,7 @@ namespace Framedash
 {
 	public sealed partial class TelemetrySDK
 	{
-		private PerformanceRunCapture _performanceRun;
+		private PerformanceRunCapture? _performanceRun;
 		private long _performanceRunTick;
 		private int _performanceRunDropBaseline;
 

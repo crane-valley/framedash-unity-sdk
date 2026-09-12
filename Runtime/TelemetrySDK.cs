@@ -385,6 +385,15 @@ namespace Framedash
             }
 
             int maxBatchSize = ResolveMaxBatchSize();
+            // Retained envelopes and active sends belong to the previous endpoint/key.
+            if (_inFlightFlush != null)
+            {
+                StopCoroutine(_inFlightFlush);
+                _transport?.AbortInFlightRequest();
+                _inFlightFlush = null;
+            }
+            _inFlightBatch = null;
+            _inFlightPersistedCount = 0;
             // Re-init starts fresh: clear flush state left over from a prior session
             // (Shutdown then Initialize) so a previous in-flight flush cannot block the
             // new session's flushes -- including session_start -- via the single-flight

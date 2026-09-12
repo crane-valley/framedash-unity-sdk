@@ -32,7 +32,13 @@ Prepared in source; the public v0.1.8 tag is not yet verified.
 
 - Aborting an asynchronous flush also cancels a pending direct-socket fallback,
   including when Unity does not dispose its nested iterator. Repeated blocking
-  flush timeouts reuse one pending DNS lookup instead of accumulating lookups.
+  flush timeouts reuse one pending DNS lookup per configured transport instead of
+  accumulating lookups; a newly configured endpoint has an independent resolver.
+- Failed blocking sends with offline persistence disabled retain reclaimed and
+  buffered envelopes separately, including retries, so two full envelopes are
+  not squeezed into one ring buffer. Reinitialization clears the previous
+  endpoint's retained state. The performance-run entry point now exposes its
+  required options parameter to nullable-enabled callers.
 - Background event tracking reads frame-time and memory values cached on the main
   thread, avoiding Unity API exceptions. Performance-run begin/end report marker
   admission failures, and buffer overflow during capture prevents a successful end.

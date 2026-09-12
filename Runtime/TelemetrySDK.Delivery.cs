@@ -12,7 +12,7 @@ namespace Framedash
             try
             {
                 if (Interlocked.CompareExchange(ref _isFlushing, 1, 0) != 0) return;
-                if (!_initialized || _buffer.Count == 0)
+                if (!_initialized || (_buffer.Count == 0 && _inFlightBatch == null))
                 {
                     Interlocked.Exchange(ref _isFlushing, 0);
                     return;
@@ -37,18 +37,20 @@ namespace Framedash
                     Debug.LogWarning("[Framedash] Offline queue head misaligned after a buffer overflow; cleared the persisted queue to avoid acking the wrong events.");
                 }
 
-                TelemetryEvent[] batch = _buffer.DequeueAll();
+                bool retainedFromBlocking = _inFlightBatch != null;
+                TelemetryEvent[] batch = _inFlightBatch ?? _buffer.DequeueAll();
                 // The leading min(pendingAck, batch) events are already on disk; mark
                 // them so the flush can ack (DropOldest) them on success and avoid
                 // re-persisting them on failure. They leave the buffer now, so drop them
                 // from the pending count (whether the send succeeds or not).
-                int persistedCount = Math.Min(_pendingPersistedEventsToAck, batch.Length);
-                _pendingPersistedEventsToAck -= persistedCount;
+                int persistedCount = retainedFromBlocking
+                    ? _inFlightPersistedCount : Math.Min(_pendingPersistedEventsToAck, batch.Length);
+                if (!retainedFromBlocking) _pendingPersistedEventsToAck -= persistedCount;
                 // Retain the batch + its persisted count so FlushBlocking can reclaim
                 // this in-flight send (the blocked main thread cannot advance its coroutine).
                 _inFlightBatch = batch;
                 _inFlightPersistedCount = persistedCount;
-                _inFlightFlush = StartCoroutine(FlushCoroutine(batch, _flushGeneration, persistedCount));
+                _inFlightFlush = StartCoroutine(FlushCoroutine(batch, _flushGeneration, persistedCount, retainedFromBlocking));
             }
             catch (Exception e)
             {
@@ -57,7 +59,7 @@ namespace Framedash
             }
         }
 
-        private IEnumerator FlushCoroutine(TelemetryEvent[] events, int generation, int persistedCount)
+        private IEnumerator FlushCoroutine(TelemetryEvent[] events, int generation, int persistedCount, bool retainInMemory)
         {
             var result = new DeliveryResult();
             try
@@ -73,9 +75,17 @@ namespace Framedash
                 // UE5, whose transport AliveFlag drops a stale flush's callback).
                 if (generation == _flushGeneration)
                 {
-                    ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount);
+                    if (retainInMemory && !_offlineQueueActive && result.DeliveredLeadingCount < events.Length)
+                    {
+                        _inFlightBatch = UndeliveredTail(events, result.DeliveredLeadingCount);
+                        _inFlightPersistedCount = 0;
+                    }
+                    else
+                    {
+                        ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount);
+                        _inFlightBatch = null;
+                    }
                     _inFlightFlush = null;
-                    _inFlightBatch = null;
                     Interlocked.Exchange(ref _isFlushing, 0);
                 }
             }
@@ -265,7 +275,7 @@ namespace Framedash
             TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(buffered, inFlight);
             if (envelopes.Length == 0) return true;
 
-            var sender = new BlockingHttpSender(_endpointUrl, _effectiveApiKey, SdkVersion);
+            var sender = new BlockingHttpSender(_endpointUrl, _effectiveApiKey, SdkVersion, _transport.BlockingDnsResolver);
             Func<long> clock = () => elapsed.ElapsedMilliseconds;
             BlockingFlush.BlockingPost post = payload =>
             {
@@ -308,10 +318,18 @@ namespace Framedash
             // otherwise a buffered failure-append could shift the head so the in-flight ack
             // deletes the just-appended undelivered events instead of the delivered prefix.
             bool allDelivered = true;
-            if (inFlight != null && inFlight.Length > 0
-                && !ReconcileBlockingEnvelope(inFlight, inFlightPersisted, deliveredInFlight))
+            if (inFlight != null && inFlight.Length > 0)
             {
-                allDelivered = false;
+                if (!_offlineQueueActive && deliveredInFlight < inFlight.Length)
+                {
+                    // Both envelopes can fill the ring; retain the reclaimed envelope separately.
+                    _inFlightBatch = UndeliveredTail(inFlight, deliveredInFlight);
+                    _inFlightPersistedCount = 0;
+                    _flushRequested = true;
+                    allDelivered = false;
+                }
+                else if (!ReconcileBlockingEnvelope(inFlight, inFlightPersisted, deliveredInFlight))
+                    allDelivered = false;
             }
             if (buffered.Length > 0
                 && !ReconcileBlockingEnvelope(buffered, bufferedPersisted, deliveredBuffered))
@@ -349,6 +367,15 @@ namespace Framedash
             return delivered == events.Length;
         }
 #endif
+
+        private static TelemetryEvent[] UndeliveredTail(TelemetryEvent[] events, int delivered)
+        {
+            if (delivered <= 0) return events;
+            if (delivered >= events.Length) return Array.Empty<TelemetryEvent>();
+            var tail = new TelemetryEvent[events.Length - delivered];
+            Array.Copy(events, delivered, tail, 0, tail.Length);
+            return tail;
+        }
 
         public void Shutdown()
         {

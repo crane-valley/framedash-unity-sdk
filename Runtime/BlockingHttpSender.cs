@@ -48,17 +48,18 @@ namespace Framedash
     internal sealed class BlockingHttpSender
     {
         private const int StatusReadBufferBytes = 1024;
-        private static readonly PendingDnsResolver Resolver = new PendingDnsResolver(Dns.GetHostAddressesAsync);
+        private readonly PendingDnsResolver _resolver;
 
         private readonly string _endpointUrl;
         private readonly string _apiKey;
         private readonly string _sdkVersion;
 
-        public BlockingHttpSender(string endpointUrl, string apiKey, string sdkVersion)
+        public BlockingHttpSender(string endpointUrl, string apiKey, string sdkVersion, PendingDnsResolver resolver)
         {
             _endpointUrl = endpointUrl;
             _apiKey = apiKey;
             _sdkVersion = sdkVersion;
+            _resolver = resolver;
         }
 
         /// <summary>
@@ -187,7 +188,7 @@ namespace Framedash
 
         // Unity's supported resolver cannot cancel a lookup, so timed-out flushes
         // must share the pending operation instead of starting more resolver work.
-        private static bool TryResolveWithinBudget(string host, long budgetMs, out IPAddress[] candidates)
+        private bool TryResolveWithinBudget(string host, long budgetMs, out IPAddress[] candidates)
         {
             candidates = System.Array.Empty<IPAddress>();
             // Uri.DnsSafeHost strips IPv6 brackets, so an IP literal parses here directly.
@@ -200,7 +201,7 @@ namespace Framedash
             try
             {
                 int waitMs = budgetMs > int.MaxValue ? int.MaxValue : (int)budgetMs;
-                if (!Resolver.TryResolve(host, waitMs, out IPAddress[] addresses)) return false;
+                if (!_resolver.TryResolve(host, waitMs, out IPAddress[] addresses)) return false;
                 var ordered = new List<IPAddress>(addresses.Length);
                 foreach (var a in addresses)
                     if (a.AddressFamily == AddressFamily.InterNetwork) ordered.Add(a);
