@@ -12,7 +12,7 @@ namespace Framedash
             try
             {
                 if (Interlocked.CompareExchange(ref _isFlushing, 1, 0) != 0) return;
-                if (!_initialized || (_buffer.Count == 0 && _inFlightBatch == null))
+                if (!_initialized || (_buffer.Count == 0 && _inFlightBatch == null && _retainedBlockingBatch == null))
                 {
                     Interlocked.Exchange(ref _isFlushing, 0);
                     return;
@@ -20,7 +20,7 @@ namespace Framedash
                 // Reset _flushRequested AFTER the _isFlushing guard so a
                 // background-thread request arriving between the two checks
                 // is not silently dropped.
-                bool retainedFromBlocking = _inFlightBatch != null;
+                bool retainedFromBlocking = _inFlightBatch != null || _retainedBlockingBatch != null;
                 _flushRequested = false;
                 if (!retainedFromBlocking) Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
 
@@ -38,7 +38,12 @@ namespace Framedash
                     Debug.LogWarning("[Framedash] Offline queue head misaligned after a buffer overflow; cleared the persisted queue to avoid acking the wrong events.");
                 }
 
-                TelemetryEvent[] batch = _inFlightBatch ?? _buffer.DequeueAll();
+                TelemetryEvent[] batch = _inFlightBatch ?? _retainedBlockingBatch ?? _buffer.DequeueAll();
+                if (ReferenceEquals(batch, _retainedBlockingBatch))
+                {
+                    _retainedBlockingBatch = null;
+                    _inFlightPersistedCount = 0;
+                }
                 // The leading min(pendingAck, batch) events are already on disk; mark
                 // them so the flush can ack (DropOldest) them on success and avoid
                 // re-persisting them on failure. They leave the buffer now, so drop them
@@ -85,7 +90,8 @@ namespace Framedash
                         ApplyPersistenceResult(events, persistedCount, result.DeliveredLeadingCount);
                         _inFlightBatch = null;
                     }
-                    if (retainInMemory && _inFlightBatch == null && _initialized && _buffer.Count > 0)
+                    if (retainInMemory && _inFlightBatch == null && _initialized
+                        && (_buffer.Count > 0 || _retainedBlockingBatch != null))
                         _flushRequested = true;
                     _inFlightFlush = null;
                     Interlocked.Exchange(ref _isFlushing, 0);
@@ -247,18 +253,20 @@ namespace Framedash
                 Debug.LogWarning("[Framedash] Offline queue head misaligned after a buffer overflow; cleared the persisted queue to avoid acking the wrong events.");
             }
 
-            // Reset the flush signals BEFORE dequeuing (mirrors Flush): a background Track()
-            // that enqueues an event AFTER this point keeps its own _flushRequested / payload
-            // estimate, so a post-snapshot event still triggers a count/size flush instead of
-            // waiting for the periodic interval.
-            _flushRequested = false;
-            Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
-
-            TelemetryEvent[] buffered = _buffer.DequeueAll();
+            bool producerDeferred = _retainedBlockingBatch != null;
+            if (!producerDeferred)
+            {
+                // Preserve signals from producers admitted after this snapshot.
+                _flushRequested = false;
+                Interlocked.Exchange(ref _estimatedPayloadBytes, 0);
+            }
+            // Retrying before another dequeue bounds retained memory to two envelopes.
+            TelemetryEvent[] buffered = _retainedBlockingBatch ?? _buffer.DequeueAll();
+            _retainedBlockingBatch = null;
             // A live in-flight batch already carried the ENTIRE persisted prefix when the
             // earlier Flush dequeued it, so bufferedPersisted is 0 whenever inFlight is
             // present; the two prefixes are never both non-zero.
-            int bufferedPersisted = Math.Min(_pendingPersistedEventsToAck, buffered.Length);
+            int bufferedPersisted = producerDeferred ? 0 : Math.Min(_pendingPersistedEventsToAck, buffered.Length);
             _pendingPersistedEventsToAck -= bufferedPersisted;
 
             TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(buffered, inFlight);
@@ -326,6 +334,11 @@ namespace Framedash
                 allDelivered = false;
             }
 
+            if (producerDeferred && _buffer.Count > 0)
+            {
+                _flushRequested = true;
+                allDelivered = false;
+            }
             if (allDelivered && _verboseLogging)
                 Debug.Log($"[Framedash] FlushBlocking delivered {deliveredInFlight + deliveredBuffered} event(s).");
             // A late-confirmed delivery was still acked above (no resend, no duplicate);
@@ -344,10 +357,8 @@ namespace Framedash
             }
             else if (delivered < events.Length)
             {
-                // No offline queue: keep the undelivered tail in memory (buffer tail) so a
-                // failed/timed-out blocking flush loses nothing, and nudge a flush so the
-                // periodic loop retries promptly.
-                for (int i = delivered; i < events.Length; i++) _buffer.Enqueue(events[i]);
+                // Producers can refill the ring while the snapshot is being sent.
+                _retainedBlockingBatch = UndeliveredTail(events, delivered);
                 _flushRequested = true;
             }
             return delivered == events.Length;
@@ -408,12 +419,17 @@ namespace Framedash
                     }
                     else
                     {
-                        TelemetryEvent[][] envelopes = BatchPolicy.BuildBlockingEnvelopes(_buffer.DequeueAll(), _inFlightBatch);
-                        if (envelopes.Length > 0)
+                        var envelopes = new System.Collections.Generic.List<TelemetryEvent[]>(3);
+                        var buffered = _buffer.DequeueAll();
+                        if (buffered.Length > 0) envelopes.Add(buffered);
+                        if (_retainedBlockingBatch != null) envelopes.Add(_retainedBlockingBatch);
+                        if (_inFlightBatch != null) envelopes.Add(_inFlightBatch);
+                        _retainedBlockingBatch = null;
+                        if (envelopes.Count > 0)
                         {
                             Interlocked.Exchange(ref _isFlushing, 1);
                             _inFlightBatch = envelopes[0];
-                            _inFlightFlush = StartCoroutine(FlushShutdownEnvelopes(envelopes, _flushGeneration));
+                            _inFlightFlush = StartCoroutine(FlushShutdownEnvelopes(envelopes.ToArray(), _flushGeneration));
                         }
                     }
                     Debug.Log("[Framedash] SDK shut down.");

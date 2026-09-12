@@ -410,12 +410,15 @@ bool delivered = TelemetrySDK.Instance.FlushBlocking(timeoutMs: 2000);
   undelivered events are written to the on-disk queue, which is loaded at SDK
   initialization -- so their delivery resumes on the next run (the current run's
   periodic flush does not re-read the disk queue). With the queue disabled the
-  undelivered events stay in the in-memory buffer and the current run's periodic
-  flush retries them.
+  undelivered events stay in at most two independent retained envelopes and the
+  current run's periodic flush retries them. New events remain in the bounded
+  producer ring; a blocking retry returns `false` if those events must wait for
+  a retained slot. Sustained producer overflow still follows the ring's existing
+  drop-oldest policy.
 - A failed offline-queue acknowledgement returns `false` and logs a warning.
   Later positional acknowledgements pause until reinitialization to avoid
   removing the wrong queued prefix. Already delivered events may replay from disk.
-- With persistence disabled, `Shutdown` attempts both recovered and buffered
+- With persistence disabled, `Shutdown` attempts recovered, retained and buffered
   envelopes asynchronously while the player loop continues. Immediate process
   exit can interrupt that attempt; call and check `FlushBlocking` before exit.
 - A batch whose delivery confirmation arrives only after the deadline is still

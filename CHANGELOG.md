@@ -25,6 +25,11 @@ Blocking flush uses the initialized transport endpoint, so later configuration
 edits cannot combine a new destination with the current session's credential.
 Initialization parameters and the optional session ID carry nullable metadata;
 the `Initialize` return value remains non-null.
+Failed blocking snapshots stay outside the producer ring, with at most two
+retained envelopes. A retry can return false while newly buffered events wait
+for a retained slot. Shutdown also attempts this third independent envelope.
+Worker performance reads now observe one complete cached refresh, including
+unavailable GPU/CPU timings, without allocating a snapshot on the hot path.
 
 ### Added
 

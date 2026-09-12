@@ -106,6 +106,7 @@ namespace Framedash
         // deliver them: the blocked main thread cannot let that coroutine advance, so its
         // already-dequeued events would otherwise be stranded. Main-thread only.
         private TelemetryEvent[]? _inFlightBatch;
+        private TelemetryEvent[]? _retainedBlockingBatch;
         private int _inFlightPersistedCount;
         // Captured on the main thread at Awake so FlushBlocking can reject an
         // off-main-thread call: it must never marshal-and-block, which would deadlock
@@ -403,6 +404,7 @@ namespace Framedash
                     _inFlightFlush = null;
                 }
                 _inFlightBatch = null;
+                _retainedBlockingBatch = null;
                 _inFlightPersistedCount = 0;
                 // Re-init starts fresh: clear flush state left over from a prior session
                 // (Shutdown then Initialize) so a previous in-flight flush cannot block the
