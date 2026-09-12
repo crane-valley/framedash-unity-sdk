@@ -25,9 +25,9 @@ namespace Framedash
 		// Reusable buffer — avoids per-call GC allocation.
 		private readonly FrameTiming[] _timings = new FrameTiming[1];
 
-		private float _cachedGpuTimeMs;
-		private float _cachedGameThreadMs;
-		private float _cachedRenderThreadMs;
+		private volatile float _cachedGpuTimeMs;
+		private volatile float _cachedGameThreadMs;
+		private volatile float _cachedRenderThreadMs;
 		private volatile float _cachedDeltaTime;
 		private long _cachedMemoryUsedBytes;
 
