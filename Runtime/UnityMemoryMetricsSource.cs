@@ -3,17 +3,8 @@ using UnityEngine.Profiling;
 
 namespace Framedash
 {
-	/// <summary>
-	/// IMemoryMetricsSource backed by UnityEngine.Profiling.Profiler. Unlike the
-	/// AsyncReadManagerMetrics I/O source, these two Profiler APIs are always
-	/// compiled in (no ENABLE_PROFILER guard) and are safe to call in a release
-	/// player -- they simply return 0 there, which this source treats as
-	/// "unavailable" per the absent-means-not-collected rule.
-	///
-	/// GetAllocatedMemoryForGraphicsDriver(): returns the driver-reported
-	/// graphics/VRAM allocation, or 0 when the platform doesn't expose it.
-	/// GetMonoUsedSizeLong(): managed (Mono/IL2CPP) heap bytes currently in use.
-	/// </summary>
+	// These Profiler APIs remain callable in release builds, so no ENABLE_PROFILER guard is needed.
+	// Zero means the platform did not collect the metric, rather than measured zero usage.
 	internal sealed class UnityMemoryMetricsSource : IMemoryMetricsSource
 	{
 		public bool TryReadVram(out long vramBytes)
@@ -28,7 +19,7 @@ namespace Framedash
 			}
 			catch (Exception)
 			{
-				// Fail-safe: never let a platform quirk throw into Update().
+				// Platform profiler failures must not escape into the game's Update loop.
 				return false;
 			}
 		}

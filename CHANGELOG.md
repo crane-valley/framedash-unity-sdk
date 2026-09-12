@@ -6,6 +6,94 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-12
+
+Shutdown attempts both recovered and buffered envelopes asynchronously without
+merging their dedup identities. The player loop must continue; with persistence
+disabled, immediate process exit can interrupt delivery.
+Normal asynchronous sends retain their undelivered tail if their finalizer runs
+while shutdown is stopping them, before the shutdown envelopes are captured.
+
+Failed offline-queue acknowledgements now make blocking flush return false and
+pause later positional acknowledgements until reinitialization. Tracking APIs
+expose nullable metadata for optional references and non-null event names.
+Fresh fully delivered events remain successful when no disk acknowledgement is
+needed. A completed recovered send re-arms delivery of the untouched producer ring.
+Blocking flush uses the initialized transport endpoint, so later configuration
+edits cannot combine a new destination with the current session's credential.
+Initialization parameters and the optional session ID carry nullable metadata;
+the `Initialize` return value remains non-null.
+Failed blocking snapshots stay outside the producer ring, with at most two
+retained envelopes. A retry can return false while newly buffered events wait
+for a retained slot. Shutdown also attempts this third independent envelope.
+Worker performance reads now observe one complete cached refresh, including
+unavailable GPU/CPU timings, without allocating a snapshot on the hot path.
+Failed disk appends also retain fresh tails outside the producer ring. Shutdown
+retries persistence for retained envelopes without re-appending their disk prefix.
+
+### Added
+
+- Opt-in `BeginPerformanceRun` / `EndPerformanceRun` with explicit run UUIDs,
+  declared conditions, bounded warm-up/frame windows, a fixed 256-bin histogram,
+  exact hitch counts and completion/dropped-sample evidence. CLI 0.1.11 can compare
+  these runs through the matching web endpoint. COPPA-enabled organizations are
+  excluded because server-side redaction removes the required attributes.
+- `FieldClamp.ClampNullableValueAttributes(Dictionary<string, string?>?)`: the same
+  attribute clamping as `ClampAttributes`, for callers whose dictionary VALUES are
+  nullable (deserialized JSON, a save file, an interop boundary). Previously such a
+  caller had to null-forgive the dictionary or accept a CS8620 nullability warning.
+  Behavior is unchanged in both entry points -- a null value is serialized as the
+  empty string, and a null or empty key still skips the entry. It is a separately
+  named method rather than an overload because C# erases the nullability of a type
+  argument, so a second `ClampAttributes` differing only in value nullability cannot
+  be declared. No wire-format change; `ClampAttributes` keeps its
+  signature and now forwards to the new method.
+
+### Changed
+
+- Aborting an asynchronous flush also cancels a pending direct-socket fallback,
+  including when Unity does not dispose its nested iterator. Repeated blocking
+  flush timeouts reuse one pending DNS lookup per configured transport instead of
+  accumulating lookups; a newly configured endpoint has an independent resolver.
+- Failed blocking sends with offline persistence disabled retain reclaimed and
+  buffered envelopes separately, including retries, so two full envelopes are
+  not squeezed into one ring buffer. Reinitialization clears the previous
+  endpoint's retained state. The performance-run entry point now exposes its
+  required options parameter to nullable-enabled callers.
+- Background event tracking reads frame-time and memory values cached on the main
+  thread, avoiding Unity API exceptions. Tracking admission and enqueueing are
+  synchronized with shutdown and reinitialization so an admitted call finishes
+  before the old queue is drained or its session state is replaced.
+  Performance-run begin/end report marker
+  admission failures, and buffer overflow during capture prevents a successful end.
+- Editor JSON parsing rejects more than 64 nested containers before recursion can
+  exhaust the stack; wide map and heatmap responses remain supported.
+
+- Added nullable reference annotations to the public API. Projects compiling with
+  nullable enabled may see new (accurate) warnings; with `TreatWarningsAsErrors`
+  these surface as errors -- add the indicated null guards or suppress per-site.
+  No runtime behavior change. The same release drops the
+  `InternalsVisibleTo("Framedash.Tests")` attribute, which named a test assembly
+  removed earlier; internals were never public API, so no supported usage changes.
+
+### Delivery
+
+- `TelemetrySDK.FlushBlocking(int timeoutMs)`: an optional synchronous flush that
+  blocks the main thread up to `timeoutMs` (clamped to 30,000 ms) and returns
+  whether every event buffered at call time was confirmed delivered (HTTP 2xx)
+  within the budget. Call it at moments that can afford a short block -- level end,
+  or before quit on a platform without offline storage -- to wait for an HTTP
+  acknowledgement. HTTP 202 does not prove durable storage; verify a fresh marker
+  through an authorized read when persistence evidence is needed. It drives a bounded
+  synchronous socket POST (Unity's coroutine/UnityWebRequest path cannot run from a
+  blocked main thread), reuses the same wire format, gzip, and headers as the async
+  transport, and honors the endpoint transport-security fail-closed check. It never
+  throws, never blocks meaningfully past the budget, and loses nothing on
+  failure/timeout: undelivered events stay on the offline queue (or in the in-memory
+  buffer when the queue is disabled). It returns `false` without sending on a
+  non-positive timeout, an uninitialized/disabled SDK, WebGL, or a call from a
+  non-main thread.
+
 ## [0.1.7] - 2026-07-24
 
 ### Added

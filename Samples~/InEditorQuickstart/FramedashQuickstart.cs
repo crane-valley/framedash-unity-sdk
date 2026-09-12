@@ -13,28 +13,25 @@ using Framedash;
 namespace FramedashSamples
 {
     /// <summary>
-    /// Framedash in-editor quickstart (the logic is Editor-only).
+    /// Goal: ACTIVATE your project (send its first real, map-qualified spatial event) straight
+    /// from the Unity Editor's Play mode -- no CI build, no real players. The SDK's automatic
+    /// performance heartbeat sends an EMPTY map_id and does NOT count toward activation; only
+    /// an explicit Track(eventName, mapId) with a non-empty, REGISTERED map_id does. This
+    /// sample sends exactly that.
     ///
-    /// Goal: ACTIVATE your project (send its first real, map-qualified spatial event)
-    /// straight from the Unity Editor's Play mode -- no CI build, no real players. The
-    /// SDK's automatic performance heartbeat sends an EMPTY map_id and does NOT count
-    /// toward activation; only an explicit Track(eventName, mapId) with a non-empty,
-    /// REGISTERED map_id does. This sample sends exactly that.
+    /// Setup (all in the Editor, about two minutes):   1. In the Framedash dashboard, open your
+    /// project -> Maps and either click      "Generate demo" (fastest) or upload a map image.
+    /// Copy one map_id from the      Maps list -- the heatmap 404s on an unknown map, so it
+    /// MUST already exist.   2. Create an empty GameObject in your scene and add this
+    /// component.   3. Paste an Ingest API key (events:write scope) into "Api Key" and the
+    /// map_id      into "Map Id".   4. Press Play. One map-qualified event is sent
+    /// automatically (your project      activates). Press the Send Key to drop additional
+    /// points on the heatmap.   5. Open that map's heatmap in the dashboard -- your point(s)
+    /// appear in seconds.
     ///
-    /// Setup (all in the Editor, about two minutes):
-    ///   1. In the Framedash dashboard, open your project -> Maps and either click
-    ///      "Generate demo" (fastest) or upload a map image. Copy one map_id from the
-    ///      Maps list -- the heatmap 404s on an unknown map, so it MUST already exist.
-    ///   2. Create an empty GameObject in your scene and add this component.
-    ///   3. Paste an Ingest API key (events:write scope) into "Api Key" and the map_id
-    ///      into "Map Id".
-    ///   4. Press Play. One map-qualified event is sent automatically (your project
-    ///      activates). Press the Send Key to drop additional points on the heatmap.
-    ///   5. Open that map's heatmap in the dashboard -- your point(s) appear in seconds.
-    ///
-    /// Fail-safe by design (matches the SDK contract): a missing field only logs a
-    /// warning, nothing here can throw out into your game loop, and the logic is
-    /// UNITY_EDITOR-only so it never runs in a player build.
+    /// Fail-safe by design (matches the SDK contract): a missing field only logs a warning,
+    /// nothing here can throw out into your game loop, and the logic is UNITY_EDITOR-only so it
+    /// never runs in a player build.
     /// </summary>
     [AddComponentMenu("Framedash/Framedash Quickstart")]
     public sealed class FramedashQuickstart : MonoBehaviour
@@ -171,9 +168,8 @@ namespace FramedashSamples
 
         private void Send()
         {
-            // The NON-EMPTY mapId is what makes this event map-qualified -- the event that
-            // activates the project. position gives the heatmap a spatial point (move this
-            // GameObject between presses to spread the points out).
+            // A non-empty mapId makes this sample event qualify for project activation; its
+            // position also supplies a heatmap point.
             TelemetrySDK.Instance.Track(_eventName, _mapId, transform.position);
 
             // Quickstart only: push the event out immediately so it reaches the heatmap in

@@ -7,7 +7,6 @@ namespace Framedash
     /// </summary>
     public static class CameraMath
     {
-        /// <summary>Normalize a yaw angle (degrees) to [0, 360).</summary>
         public static float NormalizeYaw(float yawDegrees)
         {
             float r = yawDegrees % 360f;
@@ -19,26 +18,22 @@ namespace Framedash
         }
 
         /// <summary>
-        /// Convert a Unity Transform.eulerAngles.x (degrees, [0,360), where
-        /// POSITIVE = pitching DOWN) to the wire pitch convention [-90, 90]
-        /// where +90 = looking up. Folds to (-180,180], negates, then clamps.
+        /// Unity's positive Euler X pitches down, while positive wire pitch looks up; the
+        /// conversion must invert the sign.
         /// </summary>
         public static float PitchFromEulerX(float eulerXDegrees)
         {
             float p = eulerXDegrees % 360f;
             if (p < 0f) p += 360f;
-            if (p > 180f) p -= 360f; // (-180, 180], positive = down
-            p = -p;                  // wire: positive = up
+            if (p > 180f) p -= 360f;
+            p = -p;
             if (p > 90f) p = 90f;
             if (p < -90f) p = -90f;
             return p;
         }
 
-        // A yaw quantum value outside the valid [0, 36000) range, used as the
-        // "no camera this frame" sentinel in the high half of a packed snapshot.
         private const long AbsentYawQuantum = 0xFFFFFFFFL;
 
-        /// <summary>The packed value meaning "no camera captured this frame".</summary>
         public const long CameraAbsent = AbsentYawQuantum << 32;
 
         /// <summary>
@@ -60,10 +55,6 @@ namespace Framedash
             return (y << 32) | p;
         }
 
-        /// <summary>
-        /// Unpack a value produced by <see cref="PackCamera"/>. Returns false (with
-        /// yaw=pitch=0) when the snapshot is the <see cref="CameraAbsent"/> sentinel.
-        /// </summary>
         public static bool TryUnpackCamera(long packed, out float yaw, out float pitch)
         {
             long y = (packed >> 32) & 0xFFFFFFFFL;

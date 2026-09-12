@@ -12,19 +12,17 @@ namespace Framedash
     /// needed because the transport only feeds the status code into RetryPolicy
     /// (the normal UnityWebRequest path uses responseCode the same way) and always
     /// sends "Connection: close". No UnityEngine or socket types so it is
-    /// NUnit-testable.
+    /// NextUnit-testable.
     /// </summary>
     public static class RawHttpMessage
     {
         /// <summary>
-        /// Build the ASCII request head (request line + headers + blank line) for the
-        /// telemetry POST. The caller writes this followed by the gzip payload bytes.
-        /// Headers mirror the UnityWebRequest path exactly (Content-Type,
-        /// Content-Encoding, X-API-Key, X-SDK-Version) plus the framing headers the
-        /// raw path must supply itself: Host (the FQDN, so Cloudflare routes by
-        /// hostname despite the IP-literal connect), Content-Length, and
-        /// "Connection: close" (one request per connection; the parser never needs
-        /// keep-alive framing).
+        /// The caller writes this followed by the gzip payload bytes. Headers mirror the
+        /// UnityWebRequest path exactly (Content-Type, Content-Encoding, X-API-Key,
+        /// X-SDK-Version) plus the framing headers the raw path must supply itself: Host (the
+        /// FQDN, so Cloudflare routes by hostname despite the IP-literal connect),
+        /// Content-Length, and "Connection: close" (one request per connection; the parser
+        /// never needs keep-alive framing).
         /// </summary>
         public static byte[] BuildPostHead(
             string requestTarget, string hostHeader, string apiKey, string sdkVersion, int contentLength)
@@ -59,7 +57,6 @@ namespace Framedash
             for (int i = 0; i < requestTarget!.Length; i++)
             {
                 char c = requestTarget[i];
-                // Reject SP (0x20) too, unlike the header-value rule.
                 bool ok = c > 0x20 && c != (char)0x7F;
                 if (!ok && sb == null)
                 {
@@ -103,14 +100,7 @@ namespace Framedash
             return sb == null ? value : sb.ToString();
         }
 
-        /// <summary>
-        /// Parse the HTTP status code out of a partially-read response buffer. Returns
-        /// true once a COMPLETE status line ("HTTP/1.1 202 Accepted\r\n") is present in
-        /// the first <paramref name="count"/> bytes and carries a 3-digit code in
-        /// 100..999; false while the line is still incomplete OR the line is not HTTP
-        /// (the caller treats never-true as a transport-level failure, status 0).
-        /// </summary>
-        public static bool TryParseStatusCode(byte[] buffer, int count, out long statusCode)
+        public static bool TryParseStatusCode(byte[]? buffer, int count, out long statusCode)
         {
             statusCode = 0;
             if (buffer == null) return false;

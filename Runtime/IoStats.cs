@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections.Generic;
 
@@ -28,7 +30,7 @@ namespace Framedash
     /// resets them to zero. Every component is clamped non-negative finite so a
     /// garbage reading can never produce a value the ingest validator would reject
     /// (which would drop the whole batch). No UnityEngine references -- pure logic,
-    /// NUnit-tested. Mirrors the FieldClamp "sanitize before it reaches the wire"
+    /// NextUnit-tested. Mirrors the FieldClamp "sanitize before it reaches the wire"
     /// style.
     /// </summary>
     public sealed class IoStats
@@ -49,9 +51,8 @@ namespace Framedash
         private bool _everActive;
 
         /// <summary>
-        /// True once ANY source (auto or manual) has fed a sample. Before this is
-        /// set the heartbeat attaches no io.* keys at all (absent = not collected;
-        /// no 0-stuffing, unlike the fixed perf fields).
+        /// Before this is set the heartbeat attaches no io.* keys at all (absent = not
+        /// collected; no 0-stuffing, unlike the fixed perf fields).
         /// </summary>
         public bool EverActive
         {
@@ -139,17 +140,17 @@ namespace Framedash
     /// it re-baselines from the current reading and contributes nothing for that
     /// window rather than emitting a garbage negative delta. Marks the source
     /// available (returns true) even for a zero / re-baselined window, so a live dev
-    /// build is treated as an active source. Engine-independent, NUnit-tested.
+    /// build is treated as an active source. Engine-independent, NextUnit-tested.
     /// </summary>
     public sealed class IoWindowDelta : IIoMetricsSource
     {
-        private readonly ICumulativeIoCounters _counters;
+        private readonly ICumulativeIoCounters? _counters;
         private long _lastBytes;
         private long _lastMicros;
         private long _lastOps;
         private bool _hasBaseline;
 
-        public IoWindowDelta(ICumulativeIoCounters counters)
+        public IoWindowDelta(ICumulativeIoCounters? counters)
         {
             _counters = counters;
             // Baseline immediately so the first heartbeat captures the window since
@@ -206,18 +207,14 @@ namespace Framedash
     }
 
     /// <summary>
-    /// Builds the io.* metrics list attached to a perf_heartbeat. Pulls the window
-    /// delta from the optional automatic source into the shared accumulator, then
-    /// drains the accumulator. Returns null until a source has ever been active
-    /// (absent = not collected); otherwise a freshly allocated 3-entry list.
-    /// Engine-independent, NUnit-tested.
+    /// Pulls the window delta from the optional automatic source into the shared accumulator,
+    /// then drains the accumulator. Returns null until a source has ever been active (absent =
+    /// not collected); otherwise a freshly allocated 3-entry list. Engine-independent,
+    /// NextUnit-tested.
     /// </summary>
     public static class IoHeartbeat
     {
-        /// <summary>
-        /// Pull + drain the window and build the heartbeat metrics list, or null.
-        /// </summary>
-        public static List<FloatPair> BuildMetrics(IIoMetricsSource autoSource, IoStats stats)
+        public static List<FloatPair>? BuildMetrics(IIoMetricsSource? autoSource, IoStats? stats)
         {
             if (stats == null) return null;
 

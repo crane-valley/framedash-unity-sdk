@@ -30,24 +30,29 @@ namespace Framedash
         public int DeliveredLeadingCount;
     }
 
-    /// <summary>
-    /// Handles HTTP transport of telemetry batches to the Framedash ingest endpoint.
-    /// Uses Protobuf + gzip encoding. Delegates retry decisions to <see cref="RetryPolicy"/>.
-    /// </summary>
     public sealed class TransportLayer
     {
+        private sealed class SendAttemptResult
+        {
+            public RetryAction Action;
+            public long StatusCode;
+            public string FailureDetail;
+        }
+
+        private sealed class FallbackState
+        {
+            public int FamilyIndex;
+            public bool PlanResolveAttempted;
+        }
+
         private readonly string _endpointUrl;
+        internal string EndpointUrl => _endpointUrl;
         private readonly string _apiKey;
         private readonly string _sdkVersion;
         private readonly int _maxPayloadBytes;
         private readonly RetryPolicy _retryPolicy;
         private readonly bool _disabled;
 
-        /// <summary>
-        /// Whole-request timeout in seconds, applied identically to the primary
-        /// UnityWebRequest attempt and to the direct-socket fallback attempt
-        /// (connect + TLS handshake + request + status read).
-        /// </summary>
         private const int RequestTimeoutSeconds = 10;
 
 #if !UNITY_WEBGL
@@ -66,12 +71,9 @@ namespace Framedash
         private EndpointAddressPlan _plan;
 
         /// <summary>
-        /// True once <see cref="_plan"/> is permanent and needs no rebuild: a
-        /// successful resolved plan, OR a STRUCTURAL passthrough (loopback /
-        /// IP-literal / non-HTTPS endpoint -- deterministic for a fixed endpoint). A
-        /// RESOLUTION-FAILED passthrough (the endpoint qualifies but neither family
-        /// resolved in time) leaves this false so a later flush retries resolution and
-        /// a transient startup DNS failure does not permanently disable the fallback.
+        /// A RESOLUTION-FAILED passthrough (the endpoint qualifies but neither family resolved
+        /// in time) leaves this false so a later flush retries resolution and a transient
+        /// startup DNS failure does not permanently disable the fallback.
         /// </summary>
         private bool _planCacheFinal;
 
@@ -84,6 +86,12 @@ namespace Framedash
         /// FAILED resolution triggers a fresh DNS attempt on a later flush.
         /// </summary>
         private Task<ValueTuple<string, string>> _resolveTask;
+
+        // Stopped nested iterators may never run their finally, so abort must retain the token.
+        private CancellationTokenSource _activeFallback;
+
+        // A reconfigured endpoint gets a new transport, isolated from the old host's stalled lookup.
+        internal readonly PendingDnsResolver BlockingDnsResolver = new PendingDnsResolver(Dns.GetHostAddressesAsync);
 
         // Out-param holder for the fallback coroutine (coroutines cannot return).
         private sealed class FallbackResult
@@ -101,6 +109,32 @@ namespace Framedash
         /// the owning <see cref="TelemetrySDK"/> takes effect on the live transport.
         /// </summary>
         public bool VerboseLogging { get; set; }
+
+        /// <summary>
+        /// The UnityWebRequest of the currently-executing SendBatch attempt, tracked so
+        /// <see cref="AbortInFlightRequest"/> can release it after the owning coroutine is
+        /// stopped. Unity disposes a STOPPED coroutine's own enumerator (running its
+        /// finally -- Shutdown relies on that for persistence), but does NOT guarantee
+        /// disposing a NESTED enumerator the coroutine was yielding on, so the request
+        /// attempt's finally may never run and native resources would wait on the finalizer.
+        /// Main-thread only (set/cleared inside the coroutine, read after
+        /// StopCoroutine on the same thread).
+        /// </summary>
+        private UnityWebRequest _activeRequest;
+
+        public void AbortInFlightRequest()
+        {
+#if !UNITY_WEBGL
+            CancelFallback(_activeFallback);
+#endif
+            var request = _activeRequest;
+            _activeRequest = null;
+            if (request == null) return;
+            // Abort is a no-op on a finished request; Dispose releases the native
+            // upload/download handlers immediately instead of waiting for the finalizer.
+            try { request.Abort(); } catch {   }
+            try { request.Dispose(); } catch {   }
+        }
 
         public TransportLayer(string endpointUrl, string apiKey, string sdkVersion, int maxPayloadBytes, bool verboseLogging = false)
         {
@@ -128,8 +162,7 @@ namespace Framedash
         }
 
         /// <summary>
-        /// Serialize and send a batch of events using Protobuf + gzip. Reports how many
-        /// leading events were delivered via <paramref name="result"/> so the caller can
+        /// Reports how many leading events were delivered via `result` so the caller can
         /// acknowledge persisted events and re-persist the undelivered tail.
         /// </summary>
         public IEnumerator SendBatch(TelemetryEvent[] events, DeliveryResult result)
@@ -166,22 +199,8 @@ namespace Framedash
                 yield break;
             }
 
-            byte[] payload;
-            try
-            {
-                payload = Compress(TelemetrySerializer.Serialize(events));
-            }
-            catch (Exception e)
-            {
-                // A serialization failure is deterministic, so persisting the batch would
-                // only reload a poison payload that fails again every run. Report it as
-                // handled to drop it instead of wedging the offline queue.
-                Debug.LogError($"[Framedash] Serialization failed: {e.Message}");
-                result.DeliveredLeadingCount = events.Length;
-                yield break;
-            }
+            if (!TrySerializeBatch(events, result, out byte[] payload)) yield break;
 
-            // If payload exceeds max, split batch in half and retry
             if (payload.Length > _maxPayloadBytes && events.Length > 1)
             {
                 yield return SplitAndResend(events, result);
@@ -197,157 +216,150 @@ namespace Framedash
                 Debug.Log(TransportLog.FormatSendAttempt(events.Length, payload.Length, _endpointUrl));
             }
 
-#if !UNITY_WEBGL
-            // familyIndex walks _plan.AttemptUrls (IPv4 -> IPv6) for the direct-socket
-            // fallback. It advances only when the FALLBACK itself fails at the
-            // transport level (status 0), never on a real HTTP response (a 5xx/429
-            // means the server was reached, so switching family is pointless).
-            // planResolveAttempted bounds the resolve wait to once per SendBatch so a
-            // persistent DNS failure cannot stack multi-second waits across attempts.
-            //
-            // ATTEMPT-ACCOUNTING CONTRACT (deliberate change from the pre-fallback
-            // transport): MaxRetries bounds PRIMARY (UnityWebRequest) attempts, and
-            // each transport-level primary failure may add ONE direct-socket fallback
-            // POST within the same attempt. Worst case (total blackout, both paths
-            // timing out every attempt) is therefore 2 x MaxRetries POSTs and roughly
-            // 2 x RequestTimeoutSeconds (~20s) wall time per attempt, in exchange for
-            // in-flush delivery whenever either path works. The loop shape, the
-            // MaxRetries denominator in retry logs, and the final-attempt backoff
-            // skip are unchanged.
-            int familyIndex = 0;
-            bool planResolveAttempted = false;
-#endif
+            yield return SendPayloadWithRetries(events, payload, result);
+        }
 
+        private static bool TrySerializeBatch(
+            TelemetryEvent[] events,
+            DeliveryResult result,
+            out byte[] payload)
+        {
+            try
+            {
+                payload = Compress(TelemetrySerializer.Serialize(events));
+                return true;
+            }
+            catch (Exception e)
+            {
+                // Deterministic poison payloads must not wedge the offline queue.
+                Debug.LogError($"[Framedash] Serialization failed: {e.Message}");
+                result.DeliveredLeadingCount = events.Length;
+                payload = Array.Empty<byte>();
+                return false;
+            }
+        }
+
+        private IEnumerator SendPayloadWithRetries(
+            TelemetryEvent[] events,
+            byte[] payload,
+            DeliveryResult result)
+        {
+            var fallbackState = new FallbackState();
+            // MaxRetries bounds primary UnityWebRequest attempts. A transport failure may
+            // add one direct-socket fallback inside that attempt, never a second retry slot.
             for (int attempt = 0; attempt < _retryPolicy.MaxRetries; attempt++)
             {
-                using (var request = new UnityWebRequest(_endpointUrl, "POST"))
+                var attemptResult = new SendAttemptResult();
+                yield return ExecuteRequestAttempt(
+                    events.Length,
+                    payload,
+                    attempt,
+                    fallbackState,
+                    attemptResult);
+
+                switch (attemptResult.Action)
                 {
-                    request.uploadHandler = new UploadHandlerRaw(payload);
-                    request.downloadHandler = new DownloadHandlerBuffer();
-                    // Whole-request timeout. Bounded to 10s (not 30s) so a broken-IPv6
-                    // network -- a global AAAA advertised via Router Advertisement with no
-                    // working route, where UnityWebRequest has no Happy Eyeballs and an
-                    // OS-resolver AAAA-first pick wedges the connect -- fails fast instead
-                    // of stalling the flush for 30s. Fail-fast is paired with an ACTIVE
-                    // address-family fallback below: a transport-level failure
-                    // (responseCode 0) triggers a direct-socket TLS retry pinned to a
-                    // resolved IPv4 (then IPv6) literal within the SAME attempt, so a
-                    // broken-IPv6 client delivers in-flush instead of relying on the
-                    // offline queue and the next run. The default-on offline queue
-                    // remains the safety net when both paths fail, and the ONLY net on
-                    // WebGL, where sockets do not exist and the fallback is compiled out.
-                    request.timeout = RequestTimeoutSeconds;
-                    request.redirectLimit = 0;
-                    request.SetRequestHeader("Content-Type", "application/x-protobuf");
-                    request.SetRequestHeader("Content-Encoding", "gzip");
-                    request.SetRequestHeader("X-API-Key", _apiKey);
-                    request.SetRequestHeader("X-SDK-Version", _sdkVersion);
+                    case RetryAction.Success:
+                        if (VerboseLogging)
+                            Debug.Log(TransportLog.FormatFlushSuccess(events.Length, attemptResult.StatusCode));
+                        result.DeliveredLeadingCount = events.Length;
+                        yield break;
 
-                    yield return request.SendWebRequest();
+                    case RetryAction.SplitBatch:
+                        yield return SplitAndResend(events, result);
+                        yield break;
 
-                    long responseCode = request.responseCode;
-                    bool usedFallback = false;
+                    case RetryAction.Fail:
+                        // Permanent failures are handled so poison events are not persisted.
+                        Debug.LogWarning($"[Framedash] Send failed permanently (HTTP {attemptResult.StatusCode}); dropping {events.Length} event(s): {attemptResult.FailureDetail}");
+                        result.DeliveredLeadingCount = events.Length;
+                        yield break;
 
-#if !UNITY_WEBGL
-                    // Prefer-IPv4-with-IPv6-fallback (parity with the Godot SDK): a
-                    // transport-level failure (responseCode 0: DNS/TLS/timeout/reset)
-                    // on the primary UnityWebRequest attempt triggers a direct-socket
-                    // TLS retry pinned to a resolved IP literal, IPv4 first. The
-                    // normal path stays UnityWebRequest; only the failure path pays
-                    // for the fallback. UnityWebRequest itself cannot pin a family:
-                    // it forbids overriding the Host header and its CertificateHandler
-                    // cannot safely validate an IP-literal connect (see
-                    // DirectSocketSender), hence the raw TcpClient + SslStream path.
-                    if (responseCode == 0)
-                    {
-                        if (!planResolveAttempted)
+                    case RetryAction.Retry:
+                        if (attempt + 1 < _retryPolicy.MaxRetries)
                         {
-                            planResolveAttempted = true;
-                            yield return EnsureDeliveryPlan();
+                            float delay = _retryPolicy.GetRetryDelaySeconds(attempt);
+                            Debug.LogWarning($"[Framedash] Retry {attempt + 1}/{_retryPolicy.MaxRetries - 1} in {delay:F1}s (HTTP {attemptResult.StatusCode})");
+                            // Unscaled time keeps retries progressing while the game is paused.
+                            yield return new WaitForSecondsRealtime(delay);
                         }
-                        if (_plan != null && !_plan.IsPassthrough)
-                        {
-                            if (VerboseLogging)
-                            {
-                                Debug.Log($"[Framedash] Transport-level failure on primary connect; direct-socket fallback to {_plan.AttemptUrls[familyIndex]}");
-                            }
-                            var fallback = new FallbackResult();
-                            yield return SendViaDirectSocket(payload, familyIndex, fallback);
-                            responseCode = fallback.StatusCode;
-                            usedFallback = true;
-                            // Fallback also failed at transport level: TOGGLE to the
-                            // other family for the next attempt (IPv4 <-> IPv6,
-                            // wrapping), so an IPv6-only network delivers over IPv6
-                            // AND a broken-IPv6 network returns to the working IPv4
-                            // after a transient glitch instead of wedging on the IPv6
-                            // blackhole. A real HTTP status keeps the same family.
-                            if (responseCode == 0)
-                            {
-                                familyIndex = EndpointAddressPlanner.NextFamily(familyIndex, _plan.AttemptUrls.Count);
-                            }
-                        }
-                    }
-#endif
-
-                    var action = _retryPolicy.Classify(
-                        responseCode, attempt, events.Length);
-
-                    switch (action)
-                    {
-                        case RetryAction.Success:
-                            // Opt-in positive delivery confirmation (F29): off by default
-                            // so it never spams a shipping game; first-time integrators flip
-                            // VerboseLogging to confirm delivery client-side.
-                            if (VerboseLogging)
-                            {
-                                Debug.Log(TransportLog.FormatFlushSuccess(events.Length, responseCode));
-                            }
-                            result.DeliveredLeadingCount = events.Length;
-                            yield break;
-
-                        case RetryAction.SplitBatch:
-                            yield return SplitAndResend(events, result);
-                            yield break;
-
-                        case RetryAction.Fail:
-                            // A non-retryable failure inside the retry loop is a permanent
-                            // client error (4xx other than 429, a surfaced 3xx, or a single
-                            // event too large to split) -- it can never succeed. Report it
-                            // as handled so the batch is dropped, not persisted: persisting
-                            // a poison payload would refill the capped queue every launch
-                            // and block newer telemetry behind events that always fail.
-                            // (Retry exhaustion on a transient code falls through below with
-                            // DeliveredLeadingCount = 0, so those events ARE persisted.)
-                            // The direct-socket fallback only parses the status line
-                            // (all the classification needs), so it has no body text.
-                            Debug.LogWarning($"[Framedash] Send failed permanently (HTTP {responseCode}); dropping {events.Length} event(s): {(usedFallback ? "(direct-socket fallback; no response body captured)" : request.downloadHandler.text)}");
-                            result.DeliveredLeadingCount = events.Length;
-                            yield break;
-
-                        case RetryAction.Retry:
-                            // Only back off when another attempt will follow. The final
-                            // attempt's backoff is pure waste -- the loop is about to exit and
-                            // the batch is persisted for the next run -- and on a broken-IPv6
-                            // blackhole (every attempt times out) it would stretch the
-                            // fail-fast path by a trailing ~16s wait before persisting.
-                            if (attempt + 1 < _retryPolicy.MaxRetries)
-                            {
-                                float delay = _retryPolicy.GetRetryDelaySeconds(attempt);
-                                // MaxRetries counts total attempts (loop bound), so the
-                                // retry budget is MaxRetries - 1.
-                                Debug.LogWarning($"[Framedash] Retry {attempt + 1}/{_retryPolicy.MaxRetries - 1} in {delay:F1}s (HTTP {responseCode})");
-                                // Real-time wait so an app pause / Time.timeScale == 0 does not
-                                // stall retry backoff (WaitForSeconds is scaled by Time.timeScale).
-                                yield return new WaitForSecondsRealtime(delay);
-                            }
-                            break;
-                    }
+                        break;
                 }
             }
 
-            // Retries exhausted: nothing delivered (DeliveredLeadingCount stays 0) so the
-            // caller persists the batch instead of dropping it.
+            // Transient exhaustion remains undelivered so the caller persists the batch.
             Debug.LogWarning($"[Framedash] Failed to send batch after {_retryPolicy.MaxRetries} attempts. Persisting {events.Length} event(s) for a later run.");
+        }
+
+        private IEnumerator ExecuteRequestAttempt(
+            int eventCount,
+            byte[] payload,
+            int attempt,
+            FallbackState fallbackState,
+            SendAttemptResult result)
+        {
+            var request = new UnityWebRequest(_endpointUrl, "POST");
+            _activeRequest = request;
+            try
+            {
+                ConfigureRequest(request, payload);
+                yield return request.SendWebRequest();
+
+                long responseCode = request.responseCode;
+                bool usedFallback = false;
+#if !UNITY_WEBGL
+                if (responseCode == 0)
+                {
+                    if (!fallbackState.PlanResolveAttempted)
+                    {
+                        fallbackState.PlanResolveAttempted = true;
+                        yield return EnsureDeliveryPlan();
+                    }
+                    if (_plan != null && !_plan.IsPassthrough)
+                    {
+                        if (VerboseLogging)
+                            Debug.Log($"[Framedash] Transport-level failure on primary connect; direct-socket fallback to {_plan.AttemptUrls[fallbackState.FamilyIndex]}");
+                        var fallback = new FallbackResult();
+                        yield return SendViaDirectSocket(payload, fallbackState.FamilyIndex, fallback);
+                        responseCode = fallback.StatusCode;
+                        usedFallback = true;
+                        if (responseCode == 0)
+                        {
+                            fallbackState.FamilyIndex = EndpointAddressPlanner.NextFamily(
+                                fallbackState.FamilyIndex,
+                                _plan.AttemptUrls.Count);
+                        }
+                    }
+                }
+#endif
+
+                result.StatusCode = responseCode;
+                result.Action = _retryPolicy.Classify(responseCode, attempt, eventCount);
+                if (result.Action == RetryAction.Fail)
+                {
+                    result.FailureDetail = usedFallback
+                        ? "(direct-socket fallback; no response body captured)"
+                        : request.downloadHandler.text;
+                }
+            }
+            finally
+            {
+                // A stopped parent coroutine can release the same request through AbortInFlightRequest.
+                _activeRequest = null;
+                request.Dispose();
+            }
+        }
+
+        private void ConfigureRequest(UnityWebRequest request, byte[] payload)
+        {
+            request.uploadHandler = new UploadHandlerRaw(payload);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.timeout = RequestTimeoutSeconds;
+            request.redirectLimit = 0;
+            request.SetRequestHeader("Content-Type", "application/x-protobuf");
+            request.SetRequestHeader("Content-Encoding", "gzip");
+            request.SetRequestHeader("X-API-Key", _apiKey);
+            request.SetRequestHeader("X-SDK-Version", _sdkVersion);
         }
 
         private IEnumerator SplitAndResend(TelemetryEvent[] events, DeliveryResult result)
@@ -374,13 +386,10 @@ namespace Framedash
         }
 
 #if !UNITY_WEBGL
-        // Resolve (once, lazily) the endpoint to concrete IP literals and build the
-        // prefer-IPv4-with-IPv6-fallback delivery plan, then cache it (fixed endpoint +
-        // stable anycast DNS). Resolution runs on the thread pool via Task.Run (the
-        // coroutine polls the task per frame with a hard cap), so a slow/cold DNS
-        // lookup never blocks the main thread. A resolution failure/timeout yields a
-        // passthrough plan that is NOT cached as final, so a transient DNS failure
-        // does not permanently disable the fallback.
+        // Resolution runs on the thread pool via Task.Run (the coroutine polls the task per
+        // frame with a hard cap), so a slow/cold DNS lookup never blocks the main thread. A
+        // resolution failure/timeout yields a passthrough plan that is NOT cached as final, so
+        // a transient DNS failure does not permanently disable the fallback.
         private IEnumerator EnsureDeliveryPlan()
         {
             if (_planCacheFinal && _plan != null) yield break;
@@ -405,16 +414,12 @@ namespace Framedash
                     // ShouldForceAddressFamily already validated the URL as an
                     // absolute HTTPS URI with a DNS host, so this cannot throw.
                     string host = new Uri(_endpointUrl).Host;
-                    // One Dns call returns BOTH families (A + AAAA);
-                    // ResolveBothBlocking never throws (failures degrade to a
-                    // passthrough plan).
                     _resolveTask = Task.Run(() => ResolveBothBlocking(host));
                 }
                 catch (Exception e)
                 {
                     Debug.LogWarning($"[Framedash] DNS resolve dispatch failed: {e.Message}");
                     _plan = EndpointAddressPlanner.Build(_endpointUrl, null, null);
-                    // Non-final: a later flush retries resolution.
                     yield break;
                 }
             }
@@ -446,8 +451,6 @@ namespace Framedash
             _planCacheFinal = !_plan.IsPassthrough;
         }
 
-        // Blocking DNS on a thread-pool thread. Returns the first address of each
-        // family (empty when a family did not resolve). Never throws (fail-safe).
         private static ValueTuple<string, string> ResolveBothBlocking(string host)
         {
             try
@@ -484,27 +487,22 @@ namespace Framedash
             result.StatusCode = 0;
 
             Task<long> sendTask;
-            CancellationTokenSource abandonSource;
+            CancellationTokenSource abandonSource = null;
             try
             {
                 string attemptUrl = _plan.AttemptUrls[familyIndex];
                 var uri = new Uri(attemptUrl);
                 byte[] head = RawHttpMessage.BuildPostHead(
                     uri.PathAndQuery, _plan.HostHeader, _apiKey, _sdkVersion, payload.Length);
-                // The abandon token guarantees a Task.Run still queued behind a busy
-                // thread pool (or not yet past the request write) can NEVER fire the
-                // POST after this coroutine stops waiting -- a late duplicate send
-                // would re-deliver events the caller already classified as failed
-                // and persisted (DeliveredLeadingCount divergence).
                 abandonSource = new CancellationTokenSource();
+                _activeFallback = abandonSource;
                 sendTask = DirectSocketSender.PostAsync(
                     attemptUrl, _plan.CommonName, head, payload, RequestTimeoutSeconds,
                     abandonSource.Token);
             }
             catch (Exception e)
             {
-                // Defensive: PostAsync itself only wraps Task.Run and should not
-                // throw; treat any dispatch failure as a transport-level failure.
+                CancelFallback(abandonSource);
                 Debug.LogWarning($"[Framedash] Direct-socket fallback dispatch failed: {e.Message}");
                 yield break;
             }
@@ -528,15 +526,17 @@ namespace Framedash
             }
             finally
             {
-                // Signal abandon whether we timed out, completed, or the coroutine
-                // was torn down mid-poll (iterator Dispose runs this finally): after
-                // completion the cancel is a no-op; otherwise it stops an unfired or
-                // pre-write send. The CTS is deliberately NOT disposed here -- the
-                // still-running task may be about to link against the token, and a
-                // timer-less CTS is reclaimed by GC without Dispose.
-                try { abandonSource.Cancel(); }
-                catch { /* never throw out of the SDK */ }
+                CancelFallback(abandonSource);
             }
+        }
+
+        private void CancelFallback(CancellationTokenSource source)
+        {
+            if (source == null) return;
+            if (ReferenceEquals(_activeFallback, source)) _activeFallback = null;
+            // Queued sends may still link this timer-less source; GC reclaims it without disposal.
+            try { source.Cancel(); }
+            catch {   }
         }
 #endif
 
