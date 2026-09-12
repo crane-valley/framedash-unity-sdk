@@ -75,7 +75,7 @@ namespace Framedash
                 // UE5, whose transport AliveFlag drops a stale flush's callback).
                 if (generation == _flushGeneration)
                 {
-                    if (retainInMemory && !_offlineQueueActive && result.DeliveredLeadingCount < events.Length)
+                    if ((retainInMemory || !_initialized) && !_offlineQueueActive && result.DeliveredLeadingCount < events.Length)
                     {
                         _inFlightBatch = UndeliveredTail(events, result.DeliveredLeadingCount);
                         _inFlightPersistedCount = 0;
@@ -369,6 +369,8 @@ namespace Framedash
                 if (!_initialized) return;
                 if (_flushCoroutine != null) StopCoroutine(_flushCoroutine);
                 EndPerformanceRun(completed: false);
+                // A normal send's finalizer must retain its tail when stopped during shutdown.
+                _initialized = false;
                 // The finalizer owns persistence or recovery; clearing its retained tail
                 // would drop a failed blocking batch before the last best-effort send.
                 if (_inFlightFlush != null)
@@ -411,7 +413,6 @@ namespace Framedash
                         _inFlightFlush = StartCoroutine(FlushShutdownEnvelopes(envelopes, _flushGeneration));
                     }
                 }
-                _initialized = false;
                 Debug.Log("[Framedash] SDK shut down.");
             }
             catch (Exception e)

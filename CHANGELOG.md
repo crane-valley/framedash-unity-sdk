@@ -13,6 +13,8 @@ Prepared in source; the public v0.1.8 tag is not yet verified.
 Shutdown attempts both recovered and buffered envelopes asynchronously without
 merging their dedup identities. The player loop must continue; with persistence
 disabled, immediate process exit can interrupt delivery.
+Normal asynchronous sends retain their undelivered tail if their finalizer runs
+while shutdown is stopping them, before the shutdown envelopes are captured.
 
 Failed offline-queue acknowledgements now make blocking flush return false and
 pause later positional acknowledgements until reinitialization. Tracking APIs
