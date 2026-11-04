@@ -35,13 +35,30 @@ namespace Framedash.Editor.Logic
 
         internal static CellRect BuildCellRect(HeatmapCell cell, MapInfo map, double cellSize)
         {
+            return cell == null ? new CellRect() : BuildCellRect(cell.X, GroundY(cell, map), map, cellSize);
+        }
+
+        // The API returns engine world axes; a Y-up map's ground plane is X/Z and its
+        // height is Y, so geometry runs on (X, Z, Y) and overlays map it back.
+        private static double GroundY(HeatmapCell cell, MapInfo map)
+        {
+            return map != null && map.IsYUp && cell.Z.HasValue ? cell.Z.Value : cell.Y;
+        }
+
+        private static double? Height(HeatmapCell cell, MapInfo map)
+        {
+            return map != null && map.IsYUp ? (cell.Z.HasValue ? cell.Y : (double?)null) : cell.Z;
+        }
+
+        private static CellRect BuildCellRect(double x, double y, MapInfo map, double cellSize)
+        {
             if (map == null || cellSize <= 0 || !IsFinite(cellSize))
             {
                 return new CellRect();
             }
 
-            double binX = Math.Floor((cell.X - map.WorldMinX) / cellSize);
-            double binY = Math.Floor((cell.Y - map.WorldMinY) / cellSize);
+            double binX = Math.Floor((x - map.WorldMinX) / cellSize);
+            double binY = Math.Floor((y - map.WorldMinY) / cellSize);
             double minX = map.WorldMinX + binX * cellSize;
             double minY = map.WorldMinY + binY * cellSize;
             return new CellRect(
@@ -85,8 +102,9 @@ namespace Framedash.Editor.Logic
                 return new HeatmapRenderCell(new CellRect(), 0, 0, normalizedWeight);
             }
 
-            double measuredZ = cell.Z.GetValueOrDefault();
-            bool hasMeasuredZ = cell.Z.HasValue
+            double? height = Height(cell, map);
+            double measuredZ = height.GetValueOrDefault();
+            bool hasMeasuredZ = height.HasValue
                 && IsFinite(measuredZ)
                 && IsFinite(cellSize)
                 && cellSize > 0;

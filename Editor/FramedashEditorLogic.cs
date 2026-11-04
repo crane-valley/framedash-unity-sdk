@@ -77,10 +77,13 @@ namespace Framedash.Editor.Logic
             public double WorldMaxY;
             public double? WorldMinZ;
             public double? WorldMaxZ;
+            public string UpAxis = "z";
             public double ImageWidth;
             public double ImageHeight;
             public string CreatedAt;
             public string UpdatedAt;
+
+            public bool IsYUp => UpAxis == "y";
         }
 
         public sealed class HeatmapCell
@@ -232,7 +235,8 @@ namespace Framedash.Editor.Logic
                     || !TryReadNumber(entry, "imageWidth", out map.ImageWidth)
                     || !TryReadNumber(entry, "imageHeight", out map.ImageHeight)
                     || !TryReadString(entry, "createdAt", out map.CreatedAt)
-                    || !TryReadString(entry, "updatedAt", out map.UpdatedAt))
+                    || !TryReadString(entry, "updatedAt", out map.UpdatedAt)
+                    || !TryReadOptionalString(entry, "upAxis", "z", out map.UpAxis))
                 {
                     maps.Clear();
                     error = "Malformed map entry in maps response.";
@@ -389,6 +393,28 @@ namespace Framedash.Editor.Logic
             return FramedashHeatmapGeometry.BuildHeatmapColors(cells, opacity);
         }
 
+        public static void MapPlaneToEngine(
+            MapInfo map,
+            double groundX,
+            double groundY,
+            double height,
+            out double x,
+            out double y,
+            out double z)
+        {
+            x = groundX;
+            if (map != null && map.IsYUp)
+            {
+                y = height;
+                z = groundY;
+            }
+            else
+            {
+                y = groundY;
+                z = height;
+            }
+        }
+
         public static string BuildHeatmapQueryPath(
             string projectId,
             string mapSlug,
@@ -400,7 +426,7 @@ namespace Framedash.Editor.Logic
                 + "/heatmap?mapId=" + Uri.EscapeDataString(mapSlug ?? "")
                 + "&cellSize=" + cellSize.ToString(CultureInfo.InvariantCulture)
                 + "&days=" + days.ToString(CultureInfo.InvariantCulture)
-                + "&includeZ=true";
+                + "&includeZ=true&coordinates=world";
             if (!string.IsNullOrEmpty(eventNameFilter))
             {
                 path += "&eventName=" + Uri.EscapeDataString(eventNameFilter);
@@ -442,6 +468,25 @@ namespace Framedash.Editor.Logic
         {
             result = null;
             if (!values.TryGetValue(name, out object value) || !(value is string text))
+            {
+                return false;
+            }
+            result = text;
+            return true;
+        }
+
+        private static bool TryReadOptionalString(
+            Dictionary<string, object> values,
+            string name,
+            string fallback,
+            out string result)
+        {
+            result = fallback;
+            if (!values.TryGetValue(name, out object value) || value == null)
+            {
+                return true;
+            }
+            if (!(value is string text))
             {
                 return false;
             }

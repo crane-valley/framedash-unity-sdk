@@ -230,7 +230,7 @@ namespace Framedash.Editor
                 }
 
                 EditorGUI.BeginChangeCheck();
-                float zOffset = EditorGUILayout.FloatField("Z Offset", _settings.ZOffset);
+                float zOffset = EditorGUILayout.FloatField("Height Offset", _settings.ZOffset);
                 if (EditorGUI.EndChangeCheck())
                 {
                     _settings.ZOffset = zOffset;
