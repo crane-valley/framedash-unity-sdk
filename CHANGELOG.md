@@ -6,6 +6,16 @@ follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-04
+
+### Changed
+
+- The SceneView heatmap overlay now requests `coordinates=world` and draws Y-up
+  maps on the engine X/Z ground with height along Y. The Z Offset control is
+  renamed Height Offset and moves along the map's active up axis (Y for Y-up
+  maps). Click Refresh Maps after changing a
+  map's up axis in the dashboard.
+
 ## [0.1.8] - 2026-09-12
 
 Shutdown attempts both recovered and buffered envelopes asynchronously without

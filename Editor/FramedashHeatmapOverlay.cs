@@ -16,6 +16,7 @@ namespace Framedash.Editor
         private bool _enabled;
         private bool _subscribed;
         private bool _shuttingDown;
+        private FramedashEditorLogic.MapInfo _map;
 
         public int CellCount => _renderCells.Count;
 
@@ -36,6 +37,7 @@ namespace Framedash.Editor
                 SceneView.RepaintAll();
                 return;
             }
+            _map = map;
             double maxWeight = FramedashEditorLogic.FindMaxWeight(cells);
             MaxWeight = maxWeight;
             for (int i = 0; i < cells.Count; i++)
@@ -73,8 +75,8 @@ namespace Framedash.Editor
                 return false;
             }
 
-            var minimum = new Vector3((float)data.MinX, (float)data.MinY, (float)data.MinZ);
-            var maximum = new Vector3((float)data.MaxX, (float)data.MaxY, (float)data.MaxZ);
+            var minimum = ToWorld(data.MinX, data.MinY, data.MinZ);
+            var maximum = ToWorld(data.MaxX, data.MaxY, data.MaxZ);
             bounds.SetMinMax(minimum, maximum);
             return true;
         }
@@ -136,12 +138,7 @@ namespace Framedash.Editor
             var vertices = new Vector3[geometry.X.Length];
             for (int i = 0; i < vertices.Length; i++)
             {
-                // TelemetrySDK.Track assigns position.x/y/z directly to PositionX/Y/Z,
-                // so an XZ ground-plane remap would render different coordinates than recorded.
-                vertices[i] = new Vector3(
-                    (float)geometry.X[i],
-                    (float)geometry.Y[i],
-                    (float)geometry.Z[i]);
+                vertices[i] = ToWorld(geometry.X[i], geometry.Y[i], geometry.Z[i]);
             }
 
             _mesh = new Mesh
@@ -154,6 +151,13 @@ namespace Framedash.Editor
             _mesh.colors = ConvertColors(geometry.Colors);
             _mesh.triangles = geometry.TriangleIndices;
             _mesh.RecalculateBounds();
+        }
+
+        private Vector3 ToWorld(double groundX, double groundY, double height)
+        {
+            FramedashEditorLogic.MapPlaneToEngine(
+                _map, groundX, groundY, height, out double x, out double y, out double z);
+            return new Vector3((float)x, (float)y, (float)z);
         }
 
         private bool EnsureMaterial()
@@ -204,7 +208,7 @@ namespace Framedash.Editor
                     throw new InvalidOperationException("Unity rejected the heatmap material pass.");
                 }
                 Matrix4x4 matrix = Matrix4x4.Translate(
-                    new Vector3(0, 0, settings.ZOffset));
+                    ToWorld(0, 0, settings.ZOffset));
                 Graphics.DrawMeshNow(_mesh, matrix);
             }
             catch (Exception exception)

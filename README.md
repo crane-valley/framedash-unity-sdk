@@ -20,7 +20,7 @@ Add via Unity Package Manager using the git URL:
 https://github.com/crane-valley/framedash-unity-sdk.git
 ```
 
-To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.8`.
+To pin a release, append a tag, e.g. `https://github.com/crane-valley/framedash-unity-sdk.git#v0.1.9`.
 
 > **Test sources are intentionally excluded from this public distribution.** The private monorepo keeps the engine-free NextUnit harness under `Tests/` for SDK development. It is omitted from the UPM git package because Unity would import those C# files without the NextUnit NuGet dependency, leaving the NextUnit APIs unresolved. There is no `Tests/` folder in the package installed through the git URL.
 
@@ -77,9 +77,14 @@ and refetches enabled heatmap data after a script/domain reload. The controls al
 show the cell count, maximum weight, and the low-to-high color legend. Map selection
 and refresh controls stack vertically so names remain readable in narrow docks.
 
-Framedash uses the recorded Unity `Vector3` components directly: telemetry X/Y/Z
-maps to SceneView X/Y/Z without a ground-plane axis remap. Use **Z Offset** only to
-apply a deliberate display translation; it does not rewrite cloud coordinates.
+The SDK still records raw Unity `Vector3` positions. Register the map as Y-up using
+the dashboard Upload Map "Up axis" select or the CLI sidecar `up_axis: "y"` with
+`"version": "1.1"` so the dashboard bins X/Z and the overlay draws on the X/Z ground
+with height along Y. After changing a map's up axis, click **Refresh Maps**.
+
+**Height Offset** moves along Y for Y-up maps and is still only a display translation; it
+does not rewrite cloud coordinates. A Unity top-down orthographic capture (camera
+looking down -Y, up = +Z) matches the map image orientation directly.
 
 ## Components
 
