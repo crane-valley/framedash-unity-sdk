@@ -121,7 +121,7 @@ its limit.
 
 ## Performance Collection
 
-`PerformanceCollector.cs` uses `Time.unscaledDeltaTime * 1000f` for `frame_time_ms` (timeScale-independent). See [Frame Timing Metrics Guide](../../docs/en/frame-timing-metrics.md) for details on available metrics and collection APIs.
+`PerformanceCollector.cs` uses `Time.unscaledDeltaTime * 1000f` for `frame_time_ms` (timeScale-independent). See the [Unity SDK guide](https://docs.framedash.dev/en/sdk/unity/) for setup and supported metrics.
 
 ## Disk I/O Metrics
 
