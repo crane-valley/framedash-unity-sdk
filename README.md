@@ -111,6 +111,14 @@ The SDK automatically sends the following events with `Source=Automated`. These 
 
 Both events include full performance metrics from `PerformanceCollector`. The heartbeat timer uses `Time.unscaledDeltaTime`, so it continues during `timeScale=0` (pause menus).
 
+## Automatic Flush
+
+The SDK requests a flush at 100 buffered events, after 30 seconds, or when its
+payload estimate reaches 102,400 bytes. The estimate is a fixed 500 bytes per
+event; it does not measure attribute text, encoded Protobuf, or gzip bytes.
+With the defaults, the 100-event trigger fires before the size estimate reaches
+its limit.
+
 ## Performance Collection
 
 `PerformanceCollector.cs` uses `Time.unscaledDeltaTime * 1000f` for `frame_time_ms` (timeScale-independent). See [Frame Timing Metrics Guide](../../docs/en/frame-timing-metrics.md) for details on available metrics and collection APIs.
@@ -225,10 +233,11 @@ The timer uses a monotonic wall clock, so a paused game or changed `Time.timeSca
 does not distort the measurement. Calling `BeginMapLoad` again before `EndMapLoad`
 replaces the pending measurement; `EndMapLoad` with no pending `BeginMapLoad` is a
 no-op. A NaN/Infinity/negative `ReportMapLoad` time is dropped (not clamped). All
-three methods never throw and are no-ops before `Initialize()`. Call them on Unity's
-main thread -- if a
-custom loader completes on a worker thread, dispatch `EndMapLoad`/`ReportMapLoad`
-back to the main thread.
+three methods never throw and are no-ops before `Initialize()`. Initialize and
+obtain the SDK instance on Unity's main thread, then pass it to worker loaders.
+`BeginMapLoad`, `EndMapLoad`, and `ReportMapLoad` support worker calls. The shared
+timer holds one pending measurement; overlapping loaders should measure their
+own durations and call `ReportMapLoad` separately.
 
 ## Field Limits
 
